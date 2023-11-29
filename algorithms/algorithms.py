@@ -1,15 +1,23 @@
+import ot
 import torch
 import torch.nn as nn
 import numpy as np
-import itertools    
+import itertools
+
+from sklearn.cluster import SpectralClustering
 
 from models.models import classifier, ReverseLayerF, Discriminator, RandomLayer, Discriminator_CDAN, \
     codats_classifier, AdvSKM_Disc, CNN_ATTN
-from models.loss import MMD_loss, CORAL, ConditionalEntropyLoss, VAT, LMMD_loss, HoMM_loss, NTXentLoss, SupConLoss
+from models.loss import MMD_loss, CORAL, ConditionalEntropyLoss, VAT, LMMD_loss, HoMM_loss, NTXentLoss, SupConLoss, \
+    SliceWassersteinDiscrepancy
 from utils import EMA
 from torch.optim.lr_scheduler import StepLR
 from copy import deepcopy
 import torch.nn. functional as F
+
+from scipy.spatial import distance
+
+
 
 def get_algorithm_class(algorithm_name):
     """Return the algorithm class with the given name."""
@@ -385,7 +393,7 @@ class CDAN(Algorithm):
             lr=hparams["learning_rate"],
             weight_decay=hparams["weight_decay"]
         )
-        self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        #self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
         # hparams
         self.hparams = hparams
         # device
@@ -468,7 +476,7 @@ class CDAN(Algorithm):
 
             for key, val in losses.items():
                 avg_meter[key].update(val, 32)
-        self.lr_scheduler.step()
+        #self.lr_scheduler.step()
 
 class DIRT(Algorithm):
     """
@@ -1121,9 +1129,9 @@ class MCD(Algorithm):
             weight_decay=hparams["weight_decay"]
         )
 
-        self.lr_scheduler_fe = StepLR(self.optimizer_fe, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
-        self.lr_scheduler_c1 = StepLR(self.optimizer_c1, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
-        self.lr_scheduler_c2 = StepLR(self.optimizer_c2, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        #self.lr_scheduler_fe = StepLR(self.optimizer_fe, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        #self.lr_scheduler_c1 = StepLR(self.optimizer_c1, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        #self.lr_scheduler_c2 = StepLR(self.optimizer_c2, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
 
         # hparams
         self.hparams = hparams
@@ -1131,7 +1139,7 @@ class MCD(Algorithm):
         self.device = device
 
         # Aligment losses
-        self.mmd_loss = MMD_loss()
+        #self.mmd_loss = MMD_loss() #Not useful ?!
 
     def update(self, src_loader, trg_loader, avg_meter, logger):
         # defining best and last model
@@ -1161,10 +1169,11 @@ class MCD(Algorithm):
 
         return last_model, best_model
 
-    def pretrain_epoch(self, src_loader,avg_meter):
+    def pretrain_epoch(self, src_loader, avg_meter):
+
         for src_x, src_y in src_loader:
             src_x, src_y = src_x.to(self.device), src_y.to(self.device)
-          
+
             src_feat = self.feature_extractor(src_x)
             src_pred1 = self.classifier(src_feat)
             src_pred2 = self.classifier2(src_feat)
@@ -1172,7 +1181,7 @@ class MCD(Algorithm):
             src_cls_loss1 = self.cross_entropy(src_pred1, src_y)
             src_cls_loss2 = self.cross_entropy(src_pred2, src_y)
 
-            loss = src_cls_loss1 + src_cls_loss2
+            loss = src_cls_loss1 + src_cls_loss2 #TODO: Not sure about that !
 
             self.optimizer_c1.zero_grad()
             self.optimizer_c2.zero_grad()
@@ -1184,7 +1193,7 @@ class MCD(Algorithm):
             self.optimizer_c2.step()
             self.optimizer_fe.step()
 
-            
+
             losses = {'Src_cls_loss': loss.item()}
 
             for key, val in losses.items():
@@ -1256,15 +1265,457 @@ class MCD(Algorithm):
             self.optimizer_c2.zero_grad()
 
 
-            losses =  {'Total_loss': loss.item(), 'MMD_loss': domain_loss.item()}
+            losses =  {'Total_loss': loss.item(), 'discrepancy_loss': domain_loss.item()}
 
             for key, val in losses.items():
                 avg_meter[key].update(val, 32)
 
-        self.lr_scheduler_fe.step()
-        self.lr_scheduler_c1.step()
-        self.lr_scheduler_c2.step()
+        #self.lr_scheduler_fe.step()
+        #self.lr_scheduler_c1.step()
+        #self.lr_scheduler_c2.step()
 
     def discrepancy(self, out1, out2):
-
         return torch.mean(torch.abs(F.softmax(out1) - F.softmax(out2)))
+
+
+class SWD(MCD):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(backbone, configs, hparams, device)
+        self.N = self.hparams['N']
+        self.swd_loss= SliceWassersteinDiscrepancy(self.device, self.N)
+    def discrepancy(self, out1, out2):
+        return self.swd_loss(out1, out2)
+
+class DeepJDOT(Algorithm):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(configs, backbone)
+
+        self.feature_extractor = backbone(configs)
+        self.classifier = classifier(configs)
+        self.network = nn.Sequential(self.feature_extractor, self.classifier)
+
+        # initialize the gamma (coupling in OT) with zeros
+        self.gamma = torch.zeros(hparams["batch_size"],hparams["batch_size"]) #.dnn.K.zeros(shape=(self.batch_size, self.batch_size))
+        # hparams
+        self.hparams = hparams
+        self.nb_classes = configs.num_classes
+        # device
+        self.device = device
+        self.gamma.to(self.device)
+
+        #OT method
+        self.ot_method = "emd"
+        self.jdot_alpha = hparams["jdot_alpha"]
+
+        self.optimizer = torch.optim.Adam(
+            self.network.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.softmax = torch.nn.Softmax()
+
+    def classifier_cat_loss(self, src_y, trg_pred):
+        '''
+        classifier loss based on categorical cross entropy in the target domain
+        1:batch_size - is source samples
+        batch_size:end - is target samples
+        self.gamma - is the optimal transport plan
+        '''
+        # source cross entropy loss
+        label_loss = -1*torch.matmul(src_y.float(), self.softmax(trg_pred).T)
+        return torch.sum(self.gamma * label_loss)
+
+    # L2 distance
+    def L2_dist(self, x, y):
+        '''
+        compute the squared L2 distance between two matrics
+        '''
+        distx = torch.reshape(torch.sum(torch.square(x), 1), (-1, 1))
+        disty = torch.reshape(torch.sum(torch.square(y), 1), (1, -1))
+        dist = distx + disty
+        dist -= 2.0 * torch.matmul(x, torch.transpose(y, 0, 1))
+        return dist
+
+    # feature allignment loss
+    def align_loss2(self, src_feat, trg_feat):
+        #gdist = self.L2_dist(src_feat, trg_feat)
+        gdist = (src_feat-trg_feat).square().sum()
+        return torch.sum(self.gamma * gdist)
+
+    def align_loss(self, src_feat, trg_feat):
+        gdist = self.L2_dist(src_feat, trg_feat)
+        return torch.sum(self.gamma * (gdist))
+
+    def to_categorical(self, y):
+        """ 1-hot encodes a tensor """
+        return torch.eye(self.nb_classes, dtype=torch.int8)[y]
+
+    def update(self, src_loader, trg_loader, avg_meter, logger):
+        # defining best and last model
+        best_src_risk = float('inf')
+        best_model = None
+
+        nb_pr_epochs = 20
+        for epoch in range(1, nb_pr_epochs+1):
+            self.pretrain_epoch(src_loader, avg_meter)
+
+            logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]') #TODO : self.hparams["num_pr_epochs"]
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        for epoch in range(1, self.hparams["num_epochs"] + 1):
+
+            # source pretraining loop
+            #self.pretrain_epoch(src_loader, avg_meter)
+
+            # training loop
+            self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
+
+            # saving the best model based on src risk
+            if (epoch + 1) % 10 == 0 and avg_meter['Src_cls_loss'].avg < best_src_risk:
+                best_src_risk = avg_meter['Src_cls_loss'].avg
+                best_model = deepcopy(self.network.state_dict())
+
+            logger.debug(f'[Epoch : {epoch}/{self.hparams["num_epochs"]}]')
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        last_model = self.network.state_dict()
+
+        return last_model, best_model
+    def pretrain_epoch(self, src_loader, avg_meter):
+
+        for src_x, src_y in src_loader:
+            src_x, src_y = src_x.to(self.device), src_y.to(self.device)
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            src_cls_loss = self.cross_entropy(src_pred, src_y)
+
+            loss = src_cls_loss
+
+            self.optimizer.zero_grad()
+
+            loss.backward()
+
+            self.optimizer.step()
+
+            losses = {'Pr_Src_cls_loss': loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+    def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
+
+        # Construct Joint Loaders
+        joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+
+        for step, ((src_x, src_y), (trg_x, _)) in joint_loader:
+            """if src_x.shape[0] != trg_x.shape[0]:
+                continue"""
+            if src_x.shape[0] > trg_x.shape[0]:
+                src_x = src_x[:trg_x.shape[0]]
+                src_y = src_y[:trg_x.shape[0]]
+            elif trg_x.shape[0] > src_x.shape[0]:
+                trg_x = trg_x[:src_x.shape[0]]
+
+            src_x, src_y, trg_x = src_x.to(self.device), src_y.to(self.device), trg_x.to(
+                self.device)  # extract source features
+
+            #Freeze Neural Network
+            for k,v in self.feature_extractor.named_parameters():
+                v.requires_grad = False
+            for k,v in self.classifier.named_parameters():
+                v.requires_grad = False
+
+            # extract source features
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+            #extract target features
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)
+
+            src_y = torch.eye(self.nb_classes, dtype=torch.int8).to(self.device)[src_y]
+
+            C0 = torch.cdist(src_feat, trg_feat, p=2.0)**2
+            C1 = torch.cdist(src_y.double(), self.softmax(trg_pred).double(), p=2.0)**2  # COMMENT : I put log_softmax
+            C = self.hparams["jdot_alpha"] * C0 + self.hparams["jdot_lambda"] * C1
+            self.gamma = ot.emd(torch.Tensor(ot.unif(src_x.shape[0])).to(self.device), torch.Tensor(ot.unif(trg_x.shape[0])).to(self.device), C)
+
+            # UnFreeze Neural Network
+            for k, v in self.feature_extractor.named_parameters():
+                v.requires_grad = True
+            for k, v in self.classifier.named_parameters():
+                v.requires_grad = True
+
+            # extract source features
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+            # extract target features
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)
+
+            #Compute Losses
+            feat_align_loss = self.hparams["jdot_alpha"] * self.align_loss(src_feat, trg_feat)
+            src_cls_loss = self.hparams["src_cls_loss_wt"] * self.cross_entropy(src_pred, src_y.double())
+            label_align_loss = self.hparams["jdot_lambda"] * self.classifier_cat_loss(src_y, trg_pred)
+            total_loss = src_cls_loss + feat_align_loss + label_align_loss
+
+            self.optimizer.zero_grad()
+
+            total_loss.backward()
+
+            self.optimizer.step()
+
+            losses = {'Total_loss': total_loss.item(), 'label_disc_loss': label_align_loss.item(), 'feat_disc_loss': feat_align_loss.item(),
+                      'Src_cls_loss': src_cls_loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+
+        # self.lr_scheduler_fe.step()
+        # self.lr_scheduler_c1.step()
+        # self.lr_scheduler_c2.step()
+
+class DeepHOT(Algorithm):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(configs, backbone)
+
+        self.cluster_trg = None
+        self.feature_extractor = backbone(configs)
+        self.classifier = classifier(configs)
+        self.network = nn.Sequential(self.feature_extractor, self.classifier)
+
+        # initialize the gamma (coupling in OT) with zeros
+        self.gamma = torch.zeros(hparams["batch_size"],hparams["batch_size"]) #.dnn.K.zeros(shape=(self.batch_size, self.batch_size))
+        # hparams
+        self.hparams = hparams
+        self.nb_classes = configs.num_classes
+        # device
+        self.device = device
+        self.gamma.to(self.device)
+
+        #OT method
+        self.ot_method = "emd"
+
+        self.spectral_clustering = SpectralClustering(self.nb_classes, eigen_solver='arpack', assign_labels='kmeans', affinity="nearest_neighbors",
+                           n_neighbors=4)
+
+        self.optimizer = torch.optim.Adam(
+            self.network.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.softmax = torch.nn.Softmax()
+
+    def Source_target_processing(self, X, y):  # grouping source (and target) data into classes (and clusters)
+        S = []
+        a = []
+        yc_source = []
+        classes = torch.unique(y)
+        k = len(classes)
+        Masks = []
+        #mu = np.ones(k) / k
+        mu = []
+        for i in range(k):
+            mask = y == i
+            if mask.sum() != 0:
+                mu.append(1)
+                Masks.append(y == i)
+                C = X[y == i]
+                yc_source = yc_source + list(y[y == i])
+                w = np.ones(C.shape[0]) / C.shape[0]
+                S.append(C)
+                a.append(w)
+                assert len(C) != 0 #'WARNING ! C == 0')
+                    # mu.append(C.shape[0]/X.shape[0])
+        mu = np.array(mu)/np.sum(mu)
+        return S, a, mu, yc_source, Masks
+
+    def Hot(self, src_feat, src_y, trg_feat):  # hierarchical formulation of OT
+        S, a, mu, yc_source, ms = self.Source_target_processing(src_feat, src_y)
+        self.cluster_trg = self.spectral_clustering.fit(trg_feat.cpu().numpy())
+        T, b, nu, _, mt = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
+        W = np.zeros((len(a), len(b)))
+        gammas = np.zeros((len(a), len(b))).tolist()
+        for i in range(len(a)):
+            for j in range(len(b)):
+                M = torch.cdist(src_feat[ms[i]], trg_feat[mt[j]])
+                gammas[i][j] = ot.emd(torch.FloatTensor(a[i]).to(self.device), torch.FloatTensor(b[j]).to(self.device), M).to(self.device)
+                W[i][j] = torch.trace(torch.matmul(gammas[i][j].T, M))
+        gamma = torch.Tensor(ot.emd(mu, nu, W)).to(self.device)
+        return gamma, gammas
+    def Hot2(self, src_feat, src_y, trg_feat):  # hierarchical formulation of OT
+        S, a, mu, yc_source = self.Source_target_processing(src_feat, src_y)
+        self.cluster_trg = self.spectral_clustering.fit(trg_feat.cpu().numpy())
+        T, b, nu, _ = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
+        W = np.zeros((len(S), len(T)))
+        gammas = np.zeros((len(S), len(T))).tolist()
+        for i in range(len(S)):
+            for j in range(len(T)):
+                M = torch.cdist(S[i], T[j])
+                #print(a[i], b[j])
+                #print(M.cpu().numpy().shape)
+                gammas[i][j] = ot.emd(torch.FloatTensor(a[i]).to(self.device), torch.FloatTensor(b[j]).to(self.device), M).to(self.device)
+                W[i][j] = torch.trace(torch.matmul(gammas[i][j].T, M))
+        gamma = torch.Tensor(ot.emd(mu, nu, W)).to(self.device)
+        return gamma, gammas
+
+    def HOT_Loss(self, src_feat, src_y, trg_feat, gamma, gammas):
+        S, a, mu, _, ms= self.Source_target_processing(src_feat, src_y)
+        T, b, nu, _, mt = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
+        W = torch.zeros((len(a), len(b))).to(self.device)
+        for i in range(len(a)):
+            for j in range(len(b)):
+                M = torch.cdist(src_feat[ms[i]], trg_feat[mt[j]])
+                W[i][j] = torch.trace(torch.matmul(gammas[i][j].T, M))
+        return torch.sum(gamma * W)
+    def HOT_Loss2(self, src_feat, src_y, trg_feat, gamma, gammas):
+        S, a, mu, _ = self.Source_target_processing(src_feat, src_y)
+        T, b, nu, _ = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
+        W = torch.zeros((len(S), len(T))).to(self.device)
+        for i in range(len(S)):
+            for j in range(len(T)):
+                M = torch.cdist(S[i], T[j])
+                W[i][j] = torch.trace(torch.matmul(gammas[i][j].T, M))
+        return gamma * W
+
+    def Mapping(self, S, T, a, b, HOT, reg3):  # mapping data of each class to the corresponding cluster
+        index = np.argmax(HOT, 1)
+        Transported_S = []
+        for i in range(len(S)):
+            M = distance.cdist(S[i], T[index[i]], metric='sqeuclidean')
+            OT = ot.sinkhorn(a[i], b[index[i]], M, reg=reg3)
+            Transported_Source = np.linalg.inv(np.diag(OT.dot(np.ones(T[index[i]].shape[0])))).dot(OT).dot(T[index[i]])
+            Transported_S = Transported_S + Transported_Source.tolist()
+        return Transported_S
+
+    def update(self, src_loader, trg_loader, avg_meter, logger):
+        # defining best and last model
+        best_src_risk = float('inf')
+        best_model = None
+
+        nb_pr_epochs = 20
+        for epoch in range(1, nb_pr_epochs+1):
+            self.pretrain_epoch(src_loader, avg_meter)
+
+            logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]') #TODO : self.hparams["num_pr_epochs"]
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        for epoch in range(1, self.hparams["num_epochs"] + 1):
+
+            # source pretraining loop
+            #self.pretrain_epoch(src_loader, avg_meter)
+
+            # training loop
+            self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
+
+            # saving the best model based on src risk
+            if (epoch + 1) % 10 == 0 and avg_meter['Src_cls_loss'].avg < best_src_risk:
+                best_src_risk = avg_meter['Src_cls_loss'].avg
+                best_model = deepcopy(self.network.state_dict())
+
+            logger.debug(f'[Epoch : {epoch}/{self.hparams["num_epochs"]}]')
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        last_model = self.network.state_dict()
+
+        return last_model, best_model
+    def pretrain_epoch(self, src_loader, avg_meter):
+
+        for src_x, src_y in src_loader:
+            src_x, src_y = src_x.to(self.device), src_y.to(self.device)
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            src_cls_loss = self.cross_entropy(src_pred, src_y)
+
+            loss = src_cls_loss
+
+            self.optimizer.zero_grad()
+
+            loss.backward()
+
+            self.optimizer.step()
+
+            losses = {'Pr_Src_cls_loss': loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+    def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
+
+        # Construct Joint Loaders
+        joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+
+        for step, ((src_x, src_y), (trg_x, _)) in joint_loader:
+            """if src_x.shape[0] != trg_x.shape[0]:
+                continue"""
+            if src_x.shape[0] > trg_x.shape[0]:
+                src_x = src_x[:trg_x.shape[0]]
+                src_y = src_y[:trg_x.shape[0]]
+            elif trg_x.shape[0] > src_x.shape[0]:
+                trg_x = trg_x[:src_x.shape[0]]
+
+            src_x, src_y, trg_x = src_x.to(self.device), src_y.to(self.device), trg_x.to(
+                self.device)  # extract source features
+
+            #Freeze Neural Network
+            for k,v in self.feature_extractor.named_parameters():
+                v.requires_grad = False
+            for k,v in self.classifier.named_parameters():
+                v.requires_grad = False
+
+            # extract source features
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+            #extract target features
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)
+
+            #src_y = torch.eye(self.nb_classes, dtype=torch.int8).to(self.device)[src_y]
+
+            #C0 = torch.cdist(src_feat, trg_feat, p=2.0)**2
+            #C1 = torch.cdist(src_y.double(), self.softmax(trg_pred).double(), p=2.0)**2  # COMMENT : I put log_softmax
+            #C = self.hparams["jdot_alpha"] * C0 + self.hparams["jdot_lambda"] * C1
+            #self.gamma = ot.emd(torch.Tensor(ot.unif(src_x.shape[0])).to(self.device), torch.Tensor(ot.unif(trg_x.shape[0])).to(self.device), C)
+            self.gamma, self.gammas = self.Hot(src_feat, src_y, trg_feat)
+
+            # UnFreeze Neural Network
+            for k, v in self.feature_extractor.named_parameters():
+                v.requires_grad = True
+            for k, v in self.classifier.named_parameters():
+                v.requires_grad = True
+
+            # extract source features
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+            # extract target features
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)
+
+            #Compute Losses
+            feat_align_loss = self.hparams["domain_loss_wt"] * self.HOT_Loss(src_feat, src_y, trg_feat, self.gamma, self.gammas)
+            src_cls_loss = self.hparams["src_cls_loss_wt"] * self.cross_entropy(src_pred, src_y)
+            total_loss = src_cls_loss + feat_align_loss
+
+            self.optimizer.zero_grad()
+
+            feat_align_loss.backward()
+
+            self.optimizer.step()
+
+            losses = {'Total_loss': total_loss.item(), 'feat_disc_loss': feat_align_loss.item(),
+                      'Src_cls_loss': src_cls_loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+

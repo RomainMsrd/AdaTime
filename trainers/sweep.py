@@ -14,8 +14,8 @@ import argparse
 import warnings
 import sklearn.exceptions
 
-from configs.sweep_params import sweep_alg_hparams
-from utils import fix_randomness, starting_logs, DictAsObject
+from configs.sweep_params import sweep_alg_hparams,sweep_train_hparams2
+from utils import fix_randomness, starting_logs, DictAsObject, create_logger, starting_task
 from algorithms.algorithms import get_algorithm_class
 from models.models import get_backbone_class
 from utils import AverageMeter
@@ -52,27 +52,38 @@ class Trainer(AbstractTrainer):
             'method': self.hp_search_strategy,
             'metric': {'name': self.metric_to_minimize, 'goal': 'minimize'},
             'name': self.da_method + '_' + self.backbone,
-            'parameters': {**sweep_alg_hparams[self.da_method]}
+            'parameters': {**sweep_alg_hparams[self.da_method], **sweep_train_hparams2}
         }
-        sweep_id = wandb.sweep(sweep_config, project=self.sweep_project_wandb, entity=self.wandb_entity)
+        self.sweep_id = wandb.sweep(sweep_config, project=self.sweep_project_wandb, entity=self.wandb_entity)
+        """self.sweep_id = sweep_id
+        if self.sweep_id is None:
+            self.sweep_id = wandb.sweep(sweep_config, project=self.sweep_project_wandb, entity=self.wandb_entity)"""
+        wandb.agent(self.sweep_id, self.train, count=sweep_runs_count)
 
-        wandb.agent(sweep_id, self.train, count=sweep_runs_count)
 
     def train(self):
         run = wandb.init(config=self.hparams)
-        self.hparams= wandb.config
-        
+        self.hparams = dict(wandb.config)
+        print(self.hparams)
         # create tables for results and risks
-        columns = ["scenario", "run", "acc", "f1_score", "auroc"]
-        table_results = wandb.Table(columns=columns, allow_mixed_types=True)
-        columns = ["scenario", "run", "src_risk", "few_shot_risk", "trg_risk"]
-        table_risks = wandb.Table(columns=columns, allow_mixed_types=True)
+        results_columns = ["scenario", "run", "acc", "f1_score", "auroc"]
+        #table_results = wandb.Table(columns=columns, allow_mixed_types=True)
+        risks_columns = ["scenario", "run", "src_risk", "few_shot_risk", "trg_risk"]
+        #table_risks = wandb.Table(columns=columns, allow_mixed_types=True)
+
+        # table with metrics
+        table_results = pd.DataFrame(columns=results_columns)
+        # table with risks
+        table_risks = pd.DataFrame(columns=risks_columns)
+
+        #self.logger = create_logger(self.exp_log_dir)
 
         for src_id, trg_id in self.dataset_configs.scenarios:
             for run_id in range(self.num_runs):
                 # set random seed and create logger
                 fix_randomness(run_id)
-                self.logger, self.scenario_log_dir = starting_logs( self.dataset, self.da_method, self.exp_log_dir, src_id, trg_id, run_id  )
+                self.logger, self.scenario_log_dir = starting_logs( self.dataset, self.da_method, self.exp_log_dir, src_id, trg_id, run_id)
+                #self.scenario_log_dir = starting_task(self.dataset, self.da_method, self.exp_log_dir, src_id, trg_id, run_id, self.logger)
 
                 # average meters
                 self.loss_avg_meters = collections.defaultdict(lambda: AverageMeter())
@@ -92,16 +103,31 @@ class Trainer(AbstractTrainer):
 
                 # append results to tables
                 scenario = f"{src_id}_to_{trg_id}"
-                table_results.add_data(scenario, run_id, *metrics)
-                table_risks.add_data(scenario, run_id, *risks)
+                table_results = self.append_results_to_tables(table_results, scenario, run_id, metrics)
+                table_risks = self.append_results_to_tables(table_risks, scenario, run_id, risks)
+                #table_results.add_data(scenario, run_id, *metrics)
+                #table_risks.add_data(scenario, run_id, *risks)
 
         # calculate overall metrics and risks
+        table_results = self.average_run_rusults(table_results)
+        table_risks = self.average_run_rusults(table_risks)
+        # Save tables to file if needed
+        self.save_sweep_tables_to_file(table_results, self.sweep_id, run.name, 'results')
+        self.save_sweep_tables_to_file(table_risks, self.sweep_id, run.name, 'risks')
+
+        #print(table_results)
+        table_results = wandb.Table(dataframe=table_results)
+        #print(table_risks)
+        table_risks = wandb.Table(dataframe=table_risks)
+
         total_results, summary_metrics = self.calculate_avg_std_wandb_table(table_results)
         total_risks, summary_risks = self.calculate_avg_std_wandb_table(table_risks)
 
         # log results to WandB
         self.wandb_logging(total_results, total_risks, summary_metrics, summary_risks)
 
+        '''for artifact in run.logged_artifacts():
+            artifact.delete()'''
         # finish the run
         run.finish()
 

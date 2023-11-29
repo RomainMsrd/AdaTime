@@ -63,6 +63,28 @@ def _logger(logger_name, level=logging.DEBUG):
     return logger
 
 
+def create_logger(exp_log_dir):
+    log_dir = os.path.join(exp_log_dir)
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_name = os.path.join(log_dir, f"logs_{datetime.now().strftime('%d_%m_%Y_%H_%M_%S')}.log")
+    logger = _logger(log_file_name)
+    log_file_name = os.path.join(log_dir, f"logs_{datetime.now().strftime('%d_%m_%Y_%H_%M_%S')}.log")
+    logger = _logger(log_file_name)
+    return logger
+
+def starting_task(data_type, da_method, exp_log_dir, src_id, tgt_id, run_id, logger):
+    log_dir = os.path.join(exp_log_dir, src_id + "_to_" + tgt_id + "_run_" + str(run_id))
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_name = os.path.join(log_dir, f"logs_{datetime.now().strftime('%d_%m_%Y_%H_%M_%S')}.log")
+    logger.debug("=" * 45)
+    logger.debug(f'Dataset: {data_type}')
+    logger.debug(f'Method:  {da_method}')
+    logger.debug("=" * 45)
+    logger.debug(f'Source: {src_id} ---> Target: {tgt_id}')
+    logger.debug(f'Run ID: {run_id}')
+    logger.debug("=" * 45)
+    return log_dir
+
 def starting_logs(data_type, da_method, exp_log_dir, src_id, tgt_id, run_id):
     log_dir = os.path.join(exp_log_dir, src_id + "_to_" + tgt_id + "_run_" + str(run_id))
     os.makedirs(log_dir, exist_ok=True)

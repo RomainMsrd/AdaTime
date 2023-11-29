@@ -4,6 +4,36 @@ import torch.nn.functional as F
 import numpy as np
 
 
+class SliceWassersteinDiscrepancy(torch.nn.Module):
+    def __init__(self, device='cuda', N=128):
+        super(SliceWassersteinDiscrepancy, self).__init__()
+        self.N = N
+        self.device = device
+    def forward(self, p1, p2):
+        proj = torch.randn([p1.shape[1], self.N]).to(self.device)
+        proj *= torch.rsqrt(proj.square().sum(dim=0))
+        p1 = torch.matmul(p1, proj).T
+        p2 = torch.matmul(p2, proj).T
+        p1.sort()
+        p2.sort()
+        wdist = (p1-p2).square().mean()
+        return wdist.mean()
+
+
+'''def discrepancy_slice_wasserstein(p1, p2):
+    s = array_ops.shape(p1)
+    if p1.get_shape().as_list()[1] > 1:
+        # For data more than one-dimensional, perform multiple random projection to 1-D
+        proj = random_ops.random_normal([array_ops.shape(p1)[1], 128])
+        proj *= math_ops.rsqrt(math_ops.reduce_sum(math_ops.square(proj), 0, keep_dims=True))
+        p1 = math_ops.matmul(p1, proj)
+        p2 = math_ops.matmul(p2, proj)
+    p1 = sort_rows(p1, s[0])
+    p2 = sort_rows(p2, s[0])
+    wdist = math_ops.reduce_mean(math_ops.square(p1 - p2))
+    return math_ops.reduce_mean(wdist)'''
+
+
 class ConditionalEntropyLoss(torch.nn.Module):
     def __init__(self):
         super(ConditionalEntropyLoss, self).__init__()
@@ -290,7 +320,6 @@ class LMMD_loss(nn.Module):
         return weight_ss.astype('float32'), weight_tt.astype('float32'), weight_st.astype('float32')
 
 
-
 class NTXentLoss(torch.nn.Module):
 
     def __init__(self, device, batch_size, temperature, use_cosine_similarity):
@@ -442,3 +471,15 @@ class SupConLoss(torch.nn.Module):
         loss = loss.view(anchor_count, batch_size).mean()
 
         return loss
+
+
+'''if __name__ == "__main__":
+    import torch
+
+    p1 = torch.Tensor(np.array([[0.8, 0.2, 0.2], [0.9, 0.05, 0.05], [0.05, 0.25, 0.25]]))
+    p2 = torch.Tensor(np.array([[0.5, 0.1, 0.4], [0.6, 0.15, 0.25], [0.05, 0.45, 0.5]]))
+
+    print(p1, p2)
+
+    ll = SliceWassersteinDiscrepancy(N=200+100*3*10)
+    print(ll.forward(p1, p2))'''

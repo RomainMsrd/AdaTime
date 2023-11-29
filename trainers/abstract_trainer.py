@@ -34,9 +34,9 @@ class AbstractTrainer(object):
         self.device = torch.device(args.device)  # device
 
         # Exp Description
-        self.experiment_description = args.dataset 
+        self.experiment_description = args.dataset
         self.run_description = f"{args.da_method}_{args.exp_name}"
-        
+
         # paths
         self.home_path =  os.getcwd() #os.path.dirname(os.getcwd())
         self.save_dir = args.save_dir
@@ -65,14 +65,14 @@ class AbstractTrainer(object):
         self.num_classes = self.dataset_configs.num_classes
         self.ACC = Accuracy(task="multiclass", num_classes=self.num_classes)
         self.F1 = F1Score(task="multiclass", num_classes=self.num_classes, average="macro")
-        self.AUROC = AUROC(task="multiclass", num_classes=self.num_classes)        
+        self.AUROC = AUROC(task="multiclass", num_classes=self.num_classes)
 
         # metrics
 
     def sweep(self):
         # sweep configurations
         pass
-    
+
     def initialize_algorithm(self):
         # get algorithm class
         algorithm_class = get_algorithm_class(self.da_method)
@@ -100,7 +100,7 @@ class AbstractTrainer(object):
         # Training the model
         self.last_model, self.best_model = self.algorithm.update(self.src_train_dl, self.trg_train_dl, self.loss_avg_meters, self.logger)
         return self.last_model, self.best_model
-    
+
     def evaluate(self, test_loader):
         feature_extractor = self.algorithm.feature_extractor.to(self.device)
         classifier = self.algorithm.classifier.to(self.device)
@@ -179,6 +179,13 @@ class AbstractTrainer(object):
         # save to file if needed
         table_results.to_csv(os.path.join(self.exp_log_dir,f"{name}.csv"))
 
+    def save_sweep_tables_to_file(self, table_results, sweep_id, run_name, name):
+        # save to file if needed
+        path = os.path.join(self.exp_log_dir, sweep_id, run_name)
+        if not os.path.exists(path):
+            os.makedirs(path)
+        table_results.to_csv(os.path.join(path, f"{name}.csv"))
+
     def save_checkpoint(self, home_path, log_dir, last_model, best_model):
         save_dict = {
             "last": last_model,
@@ -188,19 +195,32 @@ class AbstractTrainer(object):
         save_path = os.path.join(home_path, log_dir, f"checkpoint.pt")
         torch.save(save_dict, save_path)
 
+    def average_run_rusults(self, df):
+        cols = df.columns[2:]
+        df_mean = df.groupby("scenario")[cols].mean().astype(float)
+        df_std = df.groupby("scenario")[cols].std()
+        df_std = df_std.rename(columns={f: f + "_std" for f in df_std.columns})
+        df = pd.concat([df_mean, df_std], axis=1, join="inner").reset_index()
+        #print(df.dtypes)
+        #df = df.columns[2:].astype(float)
+        return df
+
     def calculate_avg_std_wandb_table(self, results):
 
-        avg_metrics = [np.mean(results.get_column(metric)) for metric in results.columns[2:]]
-        std_metrics = [np.std(results.get_column(metric)) for metric in results.columns[2:]]
-        summary_metrics = {metric: np.mean(results.get_column(metric)) for metric in results.columns[2:]}
+        avg_metrics = [np.mean(results.get_column(metric)) for metric in results.columns[1:]]
+        std_metrics = [np.std(results.get_column(metric)) for metric in results.columns[1:]]
+        summary_metrics = {metric: np.mean(results.get_column(metric)) for metric in results.columns[1:]}
 
-        results.add_data('mean', '-', *avg_metrics)
-        results.add_data('std', '-', *std_metrics)
+        '''results.add_data('mean', '-', *avg_metrics)
+        results.add_data('std', '-', *std_metrics)'''
+
+        results.add_data('mean', *avg_metrics)
+        results.add_data('std', *std_metrics)
 
         return results, summary_metrics
 
     def log_summary_metrics_wandb(self, results, risks):
-       
+
         # Calculate average and standard deviation for metrics
         avg_metrics = [np.mean(results.get_column(metric)) for metric in results.columns[2:]]
         std_metrics = [np.std(results.get_column(metric)) for metric in results.columns[2:]]
@@ -230,7 +250,7 @@ class AbstractTrainer(object):
         wandb.log(summary_risks)
 
     def calculate_metrics(self):
-       
+
         self.evaluate(self.trg_test_dl)
         # accuracy  
         acc = self.ACC(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
@@ -266,7 +286,7 @@ class AbstractTrainer(object):
         table = pd.concat([table, results_df], ignore_index=True)
 
         return table
-    
+
     def add_mean_std_table(self, table, columns):
         # Calculate average and standard deviation for metrics
         avg_metrics = [table[metric].mean() for metric in columns[2:]]
@@ -283,6 +303,6 @@ class AbstractTrainer(object):
         format_func = lambda x: f"{x:.4f}" if isinstance(x, float) else x
 
         # Apply the formatting function to each element in the tables
-        table = table.applymap(format_func)
+        table = table.map(format_func)
 
-        return table 
+        return table

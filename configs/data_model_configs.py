@@ -89,8 +89,9 @@ class WISDM(object):
         super(WISDM, self).__init__()
         self.class_names = ['walk', 'jog', 'sit', 'stand', 'upstairs', 'downstairs']
         self.sequence_len = 128
-        self.scenarios = [("7", "18"), ("20", "30"), ("35", "31"), ("17", "23"), ("6", "19"),
-                          ("2", "11"), ("33", "12"), ("5", "26"), ("28", "4"), ("23", "32")]
+        '''self.scenarios = [("7", "18"), ("20", "30"), ("35", "31"), ("17", "23"), ("6", "19"),
+                          ("2", "11"), ("33", "12"), ("5", "26"), ("28", "4"), ("23", "32")]'''
+        self.scenarios = [("7", "18"), ("20", "30")]
         self.num_classes = 6
         self.shuffle = True
         self.drop_last = False
