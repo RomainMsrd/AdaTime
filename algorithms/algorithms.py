@@ -7,14 +7,14 @@ import itertools
 from sklearn.cluster import SpectralClustering
 
 from models.models import classifier, ReverseLayerF, Discriminator, RandomLayer, Discriminator_CDAN, \
-    codats_classifier, AdvSKM_Disc, CNN_ATTN
+    codats_classifier, AdvSKM_Disc, CNN_ATTN, CNN_VAE, ConvVAE
 from models.loss import MMD_loss, CORAL, ConditionalEntropyLoss, VAT, LMMD_loss, HoMM_loss, NTXentLoss, SupConLoss, \
     SliceWassersteinDiscrepancy
 from utils import EMA
 from torch.optim.lr_scheduler import StepLR
 from copy import deepcopy
 import torch.nn. functional as F
-
+from models.kmeans.minibatchkmeans import MiniBatchKMeans
 from scipy.spatial import distance
 
 
@@ -1501,8 +1501,10 @@ class DeepHOT(Algorithm):
         #OT method
         self.ot_method = "emd"
 
-        self.spectral_clustering = SpectralClustering(self.nb_classes, eigen_solver='arpack', assign_labels='kmeans', affinity="nearest_neighbors",
-                           n_neighbors=4)
+        '''self.spectral_clustering = SpectralClustering(self.nb_classes, eigen_solver='arpack', assign_labels='kmeans', affinity="nearest_neighbors",
+                           n_neighbors=4)'''
+        self.kmeans = MiniBatchKMeans(self.nb_classes, similarity_based=True, max_iter=100)
+        self.VAE = ConvVAE(configs)
 
         self.optimizer = torch.optim.Adam(
             self.network.parameters(),
@@ -1510,10 +1512,15 @@ class DeepHOT(Algorithm):
             weight_decay=hparams["weight_decay"]
         )
 
+        self.optimizer_vae = torch.optim.Adam(
+            self.network.parameters(),
+            lr=0.01,
+            weight_decay=hparams["weight_decay"]
+        )
+
         self.softmax = torch.nn.Softmax()
 
     def Source_target_processing(self, X, y):  # grouping source (and target) data into classes (and clusters)
-        S = []
         a = []
         yc_source = []
         classes = torch.unique(y)
@@ -1529,17 +1536,18 @@ class DeepHOT(Algorithm):
                 C = X[y == i]
                 yc_source = yc_source + list(y[y == i])
                 w = np.ones(C.shape[0]) / C.shape[0]
-                S.append(C)
                 a.append(w)
                 assert len(C) != 0 #'WARNING ! C == 0')
                     # mu.append(C.shape[0]/X.shape[0])
         mu = np.array(mu)/np.sum(mu)
-        return S, a, mu, yc_source, Masks
+        return a, mu, yc_source, Masks
 
-    def Hot(self, src_feat, src_y, trg_feat):  # hierarchical formulation of OT
-        S, a, mu, yc_source, ms = self.Source_target_processing(src_feat, src_y)
-        self.cluster_trg = self.spectral_clustering.fit(trg_feat.cpu().numpy())
-        T, b, nu, _, mt = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
+    def Hot(self, src_feat, src_y, trg_feat, trg_x):  # hierarchical formulation of OT
+        a, mu, yc_source, ms = self.Source_target_processing(src_feat, src_y)
+        #self.cluster_trg = self.spectral_clustering.fit(trg_feat.cpu().numpy())
+        #T, b, nu, _, mt = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
+        clusters = torch.Tensor(self.kmeans.transform_tensor(trg_x)).to(self.device)
+        b, nu, _, mt = self.Source_target_processing(trg_feat, clusters)
         W = np.zeros((len(a), len(b)))
         gammas = np.zeros((len(a), len(b))).tolist()
         for i in range(len(a)):
@@ -1549,71 +1557,45 @@ class DeepHOT(Algorithm):
                 W[i][j] = torch.trace(torch.matmul(gammas[i][j].T, M))
         gamma = torch.Tensor(ot.emd(mu, nu, W)).to(self.device)
         return gamma, gammas
-    def Hot2(self, src_feat, src_y, trg_feat):  # hierarchical formulation of OT
-        S, a, mu, yc_source = self.Source_target_processing(src_feat, src_y)
-        self.cluster_trg = self.spectral_clustering.fit(trg_feat.cpu().numpy())
-        T, b, nu, _ = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
-        W = np.zeros((len(S), len(T)))
-        gammas = np.zeros((len(S), len(T))).tolist()
-        for i in range(len(S)):
-            for j in range(len(T)):
-                M = torch.cdist(S[i], T[j])
-                #print(a[i], b[j])
-                #print(M.cpu().numpy().shape)
-                gammas[i][j] = ot.emd(torch.FloatTensor(a[i]).to(self.device), torch.FloatTensor(b[j]).to(self.device), M).to(self.device)
-                W[i][j] = torch.trace(torch.matmul(gammas[i][j].T, M))
-        gamma = torch.Tensor(ot.emd(mu, nu, W)).to(self.device)
-        return gamma, gammas
 
-    def HOT_Loss(self, src_feat, src_y, trg_feat, gamma, gammas):
-        S, a, mu, _, ms= self.Source_target_processing(src_feat, src_y)
-        T, b, nu, _, mt = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
+
+    def HOT_Loss(self, src_feat, src_y, trg_feat, trg_x, gamma, gammas):
+        a, mu, _, ms= self.Source_target_processing(src_feat, src_y)
+        #T, b, nu, _, mt = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
+        b, nu, _, mt = self.Source_target_processing(trg_feat, torch.Tensor(self.kmeans.transform_tensor(trg_x)).to(self.device))
         W = torch.zeros((len(a), len(b))).to(self.device)
         for i in range(len(a)):
             for j in range(len(b)):
                 M = torch.cdist(src_feat[ms[i]], trg_feat[mt[j]])
                 W[i][j] = torch.trace(torch.matmul(gammas[i][j].T, M))
         return torch.sum(gamma * W)
-    def HOT_Loss2(self, src_feat, src_y, trg_feat, gamma, gammas):
-        S, a, mu, _ = self.Source_target_processing(src_feat, src_y)
-        T, b, nu, _ = self.Source_target_processing(trg_feat, torch.Tensor(self.cluster_trg.labels_).to(self.device))
-        W = torch.zeros((len(S), len(T))).to(self.device)
-        for i in range(len(S)):
-            for j in range(len(T)):
-                M = torch.cdist(S[i], T[j])
-                W[i][j] = torch.trace(torch.matmul(gammas[i][j].T, M))
-        return gamma * W
-
-    def Mapping(self, S, T, a, b, HOT, reg3):  # mapping data of each class to the corresponding cluster
-        index = np.argmax(HOT, 1)
-        Transported_S = []
-        for i in range(len(S)):
-            M = distance.cdist(S[i], T[index[i]], metric='sqeuclidean')
-            OT = ot.sinkhorn(a[i], b[index[i]], M, reg=reg3)
-            Transported_Source = np.linalg.inv(np.diag(OT.dot(np.ones(T[index[i]].shape[0])))).dot(OT).dot(T[index[i]])
-            Transported_S = Transported_S + Transported_Source.tolist()
-        return Transported_S
 
     def update(self, src_loader, trg_loader, avg_meter, logger):
         # defining best and last model
         best_src_risk = float('inf')
+        self.best_vae_loss = float('inf')
         best_model = None
 
-        nb_pr_epochs = 20
+        nb_pr_epochs = 50
         for epoch in range(1, nb_pr_epochs+1):
-            self.pretrain_epoch(src_loader, avg_meter)
+
+            self.pretrain_epoch(src_loader, trg_loader, avg_meter)
 
             logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]') #TODO : self.hparams["num_pr_epochs"]
             for key, val in avg_meter.items():
                 logger.debug(f'{key}\t: {val.avg:2.4f}')
             logger.debug(f'-------------------------------------')
-
+        #self.VAE.load_state_dict(torch.load('./temp/weigths/best_model.pth'))
+        del self.VAE
+        with torch.no_grad():
+            self.kmeans = self.kmeans.fit_latent(trg_loader, self.configs)
         for epoch in range(1, self.hparams["num_epochs"] + 1):
 
             # source pretraining loop
             #self.pretrain_epoch(src_loader, avg_meter)
 
             # training loop
+            torch.cuda.empty_cache()
             self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
 
             # saving the best model based on src risk
@@ -1629,7 +1611,32 @@ class DeepHOT(Algorithm):
         last_model = self.network.state_dict()
 
         return last_model, best_model
-    def pretrain_epoch(self, src_loader, avg_meter):
+    def pretrain_epoch(self, src_loader, trg_loader, avg_meter):
+        total_vae_loss = 0
+        for trg_x, trg_y in trg_loader:
+            self.optimizer_vae.zero_grad()
+            trg_x, trg_y = trg_x.to(self.device), trg_y.to(self.device)
+            out, mu, logVar = self.VAE(trg_x)
+
+            recon_loss, kl_loss = self.VAE.loss(trg_x, out, mu, logVar)
+            recon_loss = recon_loss
+            kl_loss = kl_loss
+            loss = recon_loss + kl_loss
+
+            loss.backward()
+
+            self.optimizer_vae.step()
+
+            losses = {'VAE_loss': loss.item(), "rec_loss" : recon_loss.item(), "kl_loss": kl_loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+            total_vae_loss += loss.item()
+        total_vae_loss = total_vae_loss/len(trg_loader)
+        if total_vae_loss < self.best_vae_loss:
+            print("Better VAE fond ! ")
+            self.best_vae_loss = total_vae_loss
+            torch.save(self.VAE.state_dict(), './temp/weigths/best_model.pth')
 
         for src_x, src_y in src_loader:
             src_x, src_y = src_x.to(self.device), src_y.to(self.device)
@@ -1651,6 +1658,7 @@ class DeepHOT(Algorithm):
 
             for key, val in losses.items():
                 avg_meter[key].update(val, 32)
+
     def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
 
         # Construct Joint Loaders
@@ -1687,7 +1695,7 @@ class DeepHOT(Algorithm):
             #C1 = torch.cdist(src_y.double(), self.softmax(trg_pred).double(), p=2.0)**2  # COMMENT : I put log_softmax
             #C = self.hparams["jdot_alpha"] * C0 + self.hparams["jdot_lambda"] * C1
             #self.gamma = ot.emd(torch.Tensor(ot.unif(src_x.shape[0])).to(self.device), torch.Tensor(ot.unif(trg_x.shape[0])).to(self.device), C)
-            self.gamma, self.gammas = self.Hot(src_feat, src_y, trg_feat)
+            self.gamma, self.gammas = self.Hot(src_feat, src_y, trg_feat, trg_x)
 
             # UnFreeze Neural Network
             for k, v in self.feature_extractor.named_parameters():
@@ -1703,7 +1711,7 @@ class DeepHOT(Algorithm):
             trg_pred = self.classifier(trg_feat)
 
             #Compute Losses
-            feat_align_loss = self.hparams["domain_loss_wt"] * self.HOT_Loss(src_feat, src_y, trg_feat, self.gamma, self.gammas)
+            feat_align_loss = self.hparams["domain_loss_wt"] * self.HOT_Loss(src_feat, src_y, trg_feat, trg_x, self.gamma, self.gammas)
             src_cls_loss = self.hparams["src_cls_loss_wt"] * self.cross_entropy(src_pred, src_y)
             total_loss = src_cls_loss + feat_align_loss
 

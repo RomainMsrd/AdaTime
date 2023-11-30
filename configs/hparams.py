@@ -191,7 +191,22 @@ class EEG():
             },
             'CoTMix': {'learning_rate': 0.001, 'mix_ratio': 0.79, 'temporal_shift': 300,
                        'src_cls_weight': 0.96, 'src_supCon_weight': 0.1, 'trg_cont_weight': 0.1,
-                       'trg_entropy_weight': 0.05}
+                       'trg_entropy_weight': 0.05},
+            'MCD': {'learning_rate': 1e-2, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43},
+            'SWD': {'learning_rate': 1e-3, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43, 'N': 128 * 10 * 3},
+            'DeepJDOT': {
+                'learning_rate': 5e-3,
+                'src_cls_loss_wt': 1,
+                "jdot_alpha": 0.0001,
+                "jdot_lambda": 0.05,
+                "ot_method": "emd",
+            },
+            'DeepHOT': {
+                'learning_rate': 5e-4,
+                'src_cls_loss_wt': 0.1,
+                "domain_loss_wt": 0.1,
+                "ot_method": "emd",
+            },
 
         }
 
@@ -498,5 +513,11 @@ class FD():
             },
             'CoTMix': {'learning_rate': 0.001, 'mix_ratio': 0.52, 'temporal_shift': 14,
                        'src_cls_weight': 0.8, 'src_supCon_weight': 0.1, 'trg_cont_weight': 0.1,
-                       'trg_entropy_weight': 0.05}
+                       'trg_entropy_weight': 0.05},
+            'DeepHOT': {
+                'learning_rate': 5e-4,
+                'src_cls_loss_wt': 0.1,
+                "domain_loss_wt": 0.1,
+                "ot_method": "emd",
+            },
         }

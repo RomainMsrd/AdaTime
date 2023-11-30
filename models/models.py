@@ -61,6 +61,164 @@ class CNN(nn.Module):
         return x_flat
 
 
+class ConvVAE(nn.Module):
+    def __init__(self, configs, latent_size=8):
+        super(ConvVAE, self).__init__()
+
+        self.latent_size = latent_size
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv1d(in_channels=configs.input_channels, out_channels=64, kernel_size=3, stride=1, padding=1),
+            # nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1),
+            # nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            nn.Flatten(),
+            nn.Linear(128 * (configs.sequence_len // 4), latent_size * 2)  # *2 for mean and variance
+        )
+
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_size, 128 * (configs.sequence_len // 4)),
+            nn.ReLU(),
+            nn.Unflatten(1, (128, configs.sequence_len // 4)),
+            nn.ConvTranspose1d(in_channels=128, out_channels=64, kernel_size=4, stride=2, padding=1),
+            # nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.ConvTranspose1d(in_channels=64, out_channels=configs.input_channels, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid()  # Assuming input data is normalized between 0 and 1
+        )
+
+    def reparameterize(self, mu, log_var):
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    def forward(self, x):
+        # Encode
+        encoding_params = self.encoder(x)
+        mu, log_var = encoding_params[:, :self.latent_size], encoding_params[:, self.latent_size:]
+
+        # Reparameterize
+        z = self.reparameterize(mu, log_var)
+
+        # Decode
+        reconstruction = self.decoder(z)
+
+        return reconstruction, mu, log_var
+
+    def projection(self, x):
+        encoding_params = self.encoder(x)
+        mu, log_var = encoding_params[:, :self.latent_size], encoding_params[:, self.latent_size:]
+        return self.reparameterize(mu, log_var)
+
+    def loss(self, x, x_dec, mu, logvar):
+        criterion = lambda x1, x2: torch.sum((x1 - x2) ** 2,1).mean()  # nn.BCELoss(reduction='sum')  # Binary cross-entropy loss for reconstruction
+        kl_divergence = lambda mu, log_var: -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+        bce = criterion(x, x_dec)
+        kl = kl_divergence(mu, logvar)
+        return bce, kl
+
+
+class CNN_VAE(nn.Module):
+    def __init__(self, configs):
+        super(CNN_VAE, self).__init__()
+
+        self.configs = configs
+        print(configs.kernel_size)
+        self.encConv1 = nn.Sequential(
+            nn.Conv1d(configs.input_channels, 8, kernel_size=configs.kernel_size,
+                      stride=configs.stride, bias=False, padding=(configs.kernel_size // 2)),
+            nn.BatchNorm1d(8),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+            nn.Dropout(configs.dropout)
+        )
+
+        self.encConv2 = nn.Sequential(
+            nn.Conv1d(8, 16, kernel_size=8, stride=1, bias=False,
+                      padding=4),
+            nn.BatchNorm1d(16),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+        )
+
+        self.enc_muFC1 = nn.Linear(16*(configs.sequence_len//2//2+1+1), configs.sequence_len)
+        self.enc_muFC2 = nn.Linear(configs.sequence_len, 16)
+
+        self.flatten = nn.Flatten()
+
+        self.enc_varFC1 = nn.Linear(16*(configs.sequence_len//2//2+1+1), configs.sequence_len)
+        self.enc_varFC2 = nn.Linear(configs.sequence_len, 16)
+
+        self.decFC1 = nn.Linear(16, configs.sequence_len)
+        self.decFC2 = nn.Linear(configs.sequence_len, 16*(configs.sequence_len//2//2+1+1))
+
+        self.decConv1 = nn.Sequential(
+            nn.ConvTranspose1d(16, 8, kernel_size=(configs.kernel_size // 2), stride=2, bias=False,
+                      padding=(configs.kernel_size // 4)),
+            nn.BatchNorm1d(8),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+        )
+
+        self.decConv2 = nn.Sequential(
+            nn.ConvTranspose1d(8, configs.input_channels, kernel_size=8,
+                      stride=2, bias=False, padding=4),
+
+        )
+
+        self.decConvF = nn.Sequential(
+            nn.ConvTranspose1d(configs.input_channels, configs.input_channels, kernel_size=8,
+                               stride=2, bias=False, padding=5),
+        )
+
+    def encoder(self, x):
+        # Input is fed into 2 convolutional layers sequentially
+        # The output feature map are fed into 2 fully-connected layers to predict mean (mu) and variance (logVar)
+        # Mu and logVar are used for generating middle representation z and KL divergence loss
+        x = self.encConv1(x)
+        x = self.encConv2(x)
+        x = self.flatten(x)
+        mu = F.relu(self.enc_muFC1(x))
+        mu = self.enc_muFC2(mu)
+        logVar = F.relu(self.enc_varFC1(x))
+        logVar = self.enc_varFC2(logVar)
+        return mu, logVar
+
+    def reparameterize(self, mu, logVar):
+        # Reparameterization takes in the input mu and logVar and sample the mu + std * eps
+        std = torch.exp(logVar / 2)
+        eps = torch.randn_like(std)
+        return mu + std * eps
+
+    def decoder(self, z):
+        # z is fed back into a fully-connected layers and then into two transpose convolutional layers
+        # The generated output is the same size of the original input
+        x = F.relu(self.decFC1(z))
+        x = F.relu(self.decFC2(x))
+        x = x.view(-1, 16, (self.configs.sequence_len//2//2+1+1))
+        x = self.decConv1(x)
+        x = self.decConv2(x)
+        x = torch.sigmoid(self.decConvF(x))
+        return x
+
+    def forward(self, x):
+        # The entire pipeline of the VAE: encoder -> reparameterization -> decoder
+        # output, mu, and logVar are returned for loss computation
+        mu, logVar = self.encoder(x)
+        z = self.reparameterize(mu, logVar)
+        out = self.decoder(z)
+        return out, mu, logVar
+
+    def loss(self, x, x_dec, mu, logvar):
+        rec_loss = torch.sum(torch.pow(x.reshape(x.shape[0], -1) - x_dec.reshape(x.shape[0], -1), 2), 1).sqrt()
+        #rec_loss = torch.sum(torch.pow(x.reshape(x.shape[0], -1) - x_dec.reshape(x.shape[0], -1), 2))
+        rec_loss = rec_loss.mean()
+        kl_loss = - 0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) #torch.sum(0.5 * (mu ** 2 + torch.exp(logvar) - logvar - 1))
+        return rec_loss, kl_loss
 
 class classifier(nn.Module):
     def __init__(self, configs):

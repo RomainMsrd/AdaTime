@@ -52,6 +52,7 @@ class EEG():
         self.sequence_len = 3000
         self.scenarios = [("0", "11"), ("7", "18"), ("9", "14"), ("12", "5"), ("16", "1"),
                           ("3", "19"), ("18", "12"), ("13", "17"), ("5", "15"), ("6", "2")]
+        self.scenarios = [("0", "11"), ("7", "18"), ("9", "14")]
         self.shuffle = True
         self.drop_last = True
         self.normalize = True
