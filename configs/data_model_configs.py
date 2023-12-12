@@ -19,7 +19,7 @@ class HAR():
         self.kernel_size = 5
         self.stride = 1
         self.dropout = 0.5
-        self.num_classes = 6
+        self.num_classes = 5
 
         # CNN and RESNET features
         self.mid_channels = 64
@@ -87,11 +87,17 @@ class EEG():
 class WISDM(object):
     def __init__(self):
         super(WISDM, self).__init__()
+        self.src_balanced = True
         self.class_names = ['walk', 'jog', 'sit', 'stand', 'upstairs', 'downstairs']
         self.sequence_len = 128
-        '''self.scenarios = [("7", "18"), ("20", "30"), ("35", "31"), ("17", "23"), ("6", "19"),
-                          ("2", "11"), ("33", "12"), ("5", "26"), ("28", "4"), ("23", "32")]'''
-        self.scenarios = [("7", "18"), ("20", "30")]
+        #Close Set Scenarios
+        self.scenarios = [("7", "18"), ("20", "30"), ("35", "31"), ("17", "23"), ("6", "19"),
+                          ("2", "11"), ("33", "12"), ("5", "26"), ("28", "4"), ("23", "32")]
+
+        #Open Set Scenario
+        #self.scenarios = [("29", "20"), ("0", "34")]
+
+        self.scenarios = [("35", "31")]
         self.num_classes = 6
         self.shuffle = True
         self.drop_last = False
@@ -129,6 +135,7 @@ class WISDM(object):
 class HHAR(object):  ## HHAR dataset, SAMSUNG device.
     def __init__(self):
         super(HHAR, self).__init__()
+        self.src_balanced = False
         self.sequence_len = 128
         self.scenarios = [("0", "6"), ("1", "6"), ("2", "7"), ("3", "8"), ("4", "5"),
                           ("5", "0"), ("6", "1"), ("7", "4"), ("8", "3"), ("0", "2")]

@@ -108,7 +108,7 @@ class EEG():
         super(EEG, self).__init__()
         self.train_params = {
             'num_epochs': 40,
-            'batch_size': 128,
+            'batch_size': 128*4,
             'weight_decay': 1e-4,
 
         }
@@ -191,7 +191,35 @@ class EEG():
             },
             'CoTMix': {'learning_rate': 0.001, 'mix_ratio': 0.79, 'temporal_shift': 300,
                        'src_cls_weight': 0.96, 'src_supCon_weight': 0.1, 'trg_cont_weight': 0.1,
-                       'trg_entropy_weight': 0.05}
+                       'trg_entropy_weight': 0.05},
+
+            'MCD': {'learning_rate': 1e-2, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43},
+            'SWD': {'learning_rate': 1e-3, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43, 'N': 128 * 10 * 3},
+            'DeepJDOT': {
+                'learning_rate': 5e-3,
+                'src_cls_loss_wt': 1,
+                "jdot_alpha": 0.0001,
+                "jdot_lambda": 0.05,
+                "ot_method": "emd",
+            },
+            'DeepHOT': {
+                'learning_rate': 5e-4,
+                'src_cls_loss_wt': 0.1,
+                "domain_loss_wt": 0.1,
+                "ot_method": "emd",
+            },
+            'JPOT': {
+                'learning_rate': 5e-4,
+                "jdot_alpha": 0.0001,
+                "jdot_lambda": 0.05,
+                "alpha": 1e-4,
+                "beta": 1e-5,
+                'nu': 0.1,
+                'm': 0.01,
+                "p_entropy": 0.01,
+                "n_entropy": 0.01,
+                "neg": 0.25
+            },
 
         }
 
@@ -200,8 +228,9 @@ class WISDM():
     def __init__(self):
         super().__init__()
         self.train_params = {
-            'num_epochs': 50,
-            'batch_size': 32*4,#32, #32,
+            'num_epochs': 70*2,
+            'num_epochs_pr':50,
+            'batch_size': 64*2,#32, #32,
             'weight_decay': 1e-4,
 
         }
@@ -305,6 +334,34 @@ class WISDM():
                 "domain_loss_wt": 0.1,
                 "ot_method": "emd",
             },
+            'PPOT': {
+                'learning_rate': 5e-4,
+                'tau': 0.05,
+                "tau1": 0.8,
+                "tau2": 1,
+                "alpha": 0.01,
+                "beta": 0.001,
+                "reg": 0.1,
+                "ot" : 5,
+                "p_entropy": 0.02,
+                "n_entropy": 2,
+                "neg" : 0.25,
+                "thresh" : 0.6,
+            },
+            'JPOT': {
+                'learning_rate': 5e-4,
+                "jdot_alpha": 5,
+                "jdot_lambda": 0.05,
+                "alpha" : 1,
+                "beta" : 0.1,
+                'nu': 0.1,
+                'm' : 0.5,
+                "p_entropy": 0.01,
+                "n_entropy": 0.01,
+                "neg": 0.25,
+            },
+
+
         }
 
 
@@ -313,6 +370,7 @@ class HHAR():
         super().__init__()
         self.train_params = {
             'num_epochs': 40,
+            'num_epochs_pr': 50,
             'batch_size': 32,
             'weight_decay': 1e-4,
         }
@@ -406,6 +464,20 @@ class HHAR():
                 "jdot_alpha": 0.0001,
                 "jdot_lambda": 0.05,
                 "ot_method": "emd",
+            },
+            'PPOT': {
+                'learning_rate': 5e-4,
+                'tau': 0.05,
+                "tau1": 0.8,
+                "tau2": 1,
+                "alpha": 0.01,
+                "beta": 0.001,
+                "reg": 0.1,
+                "ot": 5,
+                "p_entropy": 0.02,
+                "n_entropy": 2,
+                "neg": 0.25,
+                "thresh": 0.6,
             },
 
         }

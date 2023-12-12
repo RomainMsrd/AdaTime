@@ -1,3 +1,4 @@
+import copy
 import sys
 sys.path.append('../../ADATIME/')
 import torch
@@ -12,7 +13,7 @@ import sklearn.exceptions
 import collections
 
 from torchmetrics import Accuracy, AUROC, F1Score
-from dataloader.dataloader import data_generator, few_shot_data_generator
+from dataloader.dataloader import data_generator, few_shot_data_generator, get_label_encoder
 from configs.data_model_configs import get_dataset_class
 from configs.hparams import get_hparams_class
 from configs.sweep_params import sweep_alg_hparams
@@ -37,16 +38,16 @@ class AbstractTrainer(object):
         self.experiment_description = args.dataset
         self.run_description = f"{args.da_method}_{args.exp_name}"
 
+        print(args)
         # paths
-        self.home_path =  os.getcwd() #os.path.dirname(os.getcwd())
+        self.home_path = os.getcwd() #os.path.dirname(os.getcwd())
         self.save_dir = args.save_dir
         self.data_path = os.path.join(args.data_path, self.dataset)
+        self.uniDA = args.uniDA
+        print("Universal : ", self.uniDA)
         # self.create_save_dir(os.path.join(self.home_path,  self.save_dir ))
         self.exp_log_dir = os.path.join(self.home_path, self.save_dir, self.experiment_description, f"{self.run_description}")
         os.makedirs(self.exp_log_dir, exist_ok=True)
-
-
-
 
         # Specify runs
         self.num_runs = args.num_runs
@@ -64,6 +65,7 @@ class AbstractTrainer(object):
         # metrics
         self.num_classes = self.dataset_configs.num_classes
         self.ACC = Accuracy(task="multiclass", num_classes=self.num_classes)
+        self.BinACC = Accuracy(task="binary")
         self.F1 = F1Score(task="multiclass", num_classes=self.num_classes, average="macro")
         self.AUROC = AUROC(task="multiclass", num_classes=self.num_classes)
 
@@ -120,8 +122,13 @@ class AbstractTrainer(object):
                 predictions = classifier(features)
 
                 # compute loss
-                loss = F.cross_entropy(predictions, labels)
-                total_loss.append(loss.item())
+                if self.uniDA:
+                    m = torch.isin(labels, self.trg_private_class.view((-1)).long().to(self.device), invert=True)
+                    loss = F.cross_entropy(predictions[m], labels[m])
+                else:
+                    loss = F.cross_entropy(predictions, labels)
+                total_loss.append(loss.detach().cpu().item())
+                predictions = self.algorithm.correct_predictions(predictions)
                 pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
 
                 # append predictions and labels
@@ -132,20 +139,55 @@ class AbstractTrainer(object):
         self.full_preds = torch.cat((preds_list))
         self.full_labels = torch.cat((labels_list))
 
+    def get_trg_private(self, src_loader, trg_loader):
+        trg_y = copy.deepcopy(trg_loader.dataset.y_data)
+        src_y = src_loader.dataset.y_data
+        pri_c = torch.Tensor(np.setdiff1d(trg_y, src_y))
+        return pri_c
+
+    def H_score(self, trg_pred, trg_y):
+        class_c = np.where(trg_y != -1)
+        class_p = np.where(trg_y == -1)
+
+        label_c, pred_c = trg_y[class_c], trg_pred[class_c]
+        label_p, pred_p = trg_y[class_p], trg_pred[class_p]
+        acc_c = self.ACC(pred_c.argmax(dim=1), label_c)
+
+        pred_p = self.algorithm.decision_function(pred_p)
+        acc_p = self.ACC(pred_p, label_p)
+        print("Trg Private Acc : ", acc_p.item())
+        if acc_c == 0 or acc_p == 0:
+            H = torch.Tensor([0])
+        else:
+            H = 2 * acc_c * acc_p / (acc_p + acc_c)
+        return H
+
     def get_configs(self):
         dataset_class = get_dataset_class(self.dataset)
         hparams_class = get_hparams_class(self.dataset)
         return dataset_class(), hparams_class()
 
+    def init_metrics(self):
+        self.num_classes = self.dataset_configs.num_classes
+        self.ACC = Accuracy(task="multiclass", num_classes=self.num_classes)
+        self.BinACC = Accuracy(task="binary")
+        self.F1 = F1Score(task="multiclass", num_classes=self.num_classes, average="macro")
+        self.AUROC = AUROC(task="multiclass", num_classes=self.num_classes)
+
     def load_data(self, src_id, trg_id):
-        self.src_train_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, "train")
-        self.src_test_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, "test")
+        encoder = get_label_encoder(self.data_path, src_id, self.dataset_configs, self.hparams, "train") if self.uniDA else None
+        self.src_train_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, encoder, "train", self.dataset_configs.src_balanced)
+        self.src_test_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, encoder,"test")
 
-        self.trg_train_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, "train")
-        self.trg_test_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, "test")
+        self.trg_train_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, encoder, "train")
+        self.trg_test_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, encoder, "test")
 
-        self.few_shot_dl_5 = few_shot_data_generator(self.trg_test_dl, self.dataset_configs,
+        self.few_shot_dl_5 = few_shot_data_generator(self.trg_test_dl, self.dataset_configs, encoder,
                                                      5)  # set 5 to other value if you want other k-shot FST
+        self.init_metrics()
+        if self.uniDA:
+            self.trg_private_class = self.get_trg_private(self.src_train_dl, self.trg_train_dl)
+            self.init_metrics()
 
     def create_save_dir(self, save_dir):
         if not os.path.exists(save_dir):
@@ -167,12 +209,16 @@ class AbstractTrainer(object):
         # f1_torch
         f1 = self.F1(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
         auroc = self.AUROC(self.full_preds.cpu(), self.full_labels.cpu()).item()
-        # f1_sk learn
-        # f1 = f1_score(self.full_preds.argmax(dim=1).cpu().numpy(), self.full_labels.cpu().numpy(), average='macro')
 
         risks = src_risk, fst_risk, trg_risk
         metrics = acc, f1, auroc
-
+        if self.uniDA:
+            mask = np.isin(self.full_preds.cpu(), self.trg_private_class)
+            self.full_labels[mask] = -1
+            H_score = self.H_score(self.full_preds.cpu(), self.full_labels.cpu())
+            metrics = acc, f1, auroc, H_score
+        # f1_sk learn
+        # f1 = f1_score(self.full_preds.argmax(dim=1).cpu().numpy(), self.full_labels.cpu().numpy(), average='macro')
         return risks, metrics
 
     def save_tables_to_file(self,table_results, name):
@@ -250,16 +296,35 @@ class AbstractTrainer(object):
         wandb.log(summary_risks)
 
     def calculate_metrics(self):
-
         self.evaluate(self.trg_test_dl)
+
+        if self.uniDA:
+            print("in")
+            mask = np.isin(self.full_labels.cpu(), self.trg_private_class, invert=True)
+            m = torch.isin(self.full_labels, self.trg_private_class.view((-1)).long().to(self.device),
+                           invert=True).cpu()
+
+            # accuracy
+            acc = self.ACC(self.full_preds[mask].argmax(dim=1).cpu(), self.full_labels[mask].cpu()).item()
+            # f1
+            f1 = self.F1(self.full_preds[mask].argmax(dim=1).cpu(), self.full_labels[mask].cpu()).item()
+            # auroc
+            auroc = self.AUROC(self.full_preds[mask].cpu(), self.full_labels[mask].cpu()).item()
+
+            self.full_labels[~mask] = -1
+            H_score = self.H_score(self.full_preds.cpu(), self.full_labels.cpu()).item()
+            print("H_score : ", H_score)
+            return acc, f1, auroc, H_score
+
         # accuracy  
         acc = self.ACC(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
         # f1
         f1 = self.F1(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
-        # auroc 
+        # auroc
         auroc = self.AUROC(self.full_preds.cpu(), self.full_labels.cpu()).item()
 
         return acc, f1, auroc
+
 
     def calculate_risks(self):
          # calculation based source test data

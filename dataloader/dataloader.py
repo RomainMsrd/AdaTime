@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.data import Dataset
 from torchvision import transforms
 
@@ -11,7 +11,7 @@ import random
 
 
 class Load_Dataset(Dataset):
-    def __init__(self, dataset, dataset_configs):
+    def __init__(self, dataset, dataset_configs, encoder):
         super().__init__()
         self.num_channels = dataset_configs.input_channels
 
@@ -20,6 +20,19 @@ class Load_Dataset(Dataset):
 
         # Load labels
         y_data = dataset.get("labels")
+
+        #Extend Encoder if necessary (new classes)
+        if not encoder is None:
+            diff = len(np.unique(y_data)) - len(encoder)
+            if diff > 0:
+                print("Private Target Classes Detected")
+                encoder = np.concatenate([encoder, np.zeros(diff, dtype=int) - 1])
+            for gt in np.unique(y_data):
+                encoder[gt] = max(encoder) + 1 if encoder[gt] == -1 else encoder[gt]
+            #Encode Labels
+            y_data = encoder[y_data]
+            self.encoder = encoder
+
         if y_data is not None and isinstance(y_data, np.ndarray):
             y_data = torch.from_numpy(y_data)
         
@@ -58,12 +71,30 @@ class Load_Dataset(Dataset):
         return self.len
 
 
-def data_generator(data_path, domain_id, dataset_configs, hparams, dtype):
+def get_label_encoder(data_path, domain_id, dataset_configs, hparams, dtype):
+    # loading dataset file from path
+    dataset_file = torch.load(os.path.join(data_path, f"{dtype}_{domain_id}.pt"))
+
+    uni = np.unique(dataset_file["labels"])
+    if len(uni) != dataset_configs.num_classes:
+        print("Private Classes Detected in Source")
+        dataset_configs.num_classes = len(uni)
+
+    encoder = np.zeros(max(uni) + 1, dtype=int) - 1
+    for i, k in enumerate(uni):
+        encoder[k] = i
+
+    '''encoder = {}
+    for i, k in enumerate(uni):
+        encoder[k] = i'''
+    return encoder
+
+def data_generator(data_path, domain_id, dataset_configs, hparams, encoder, dtype, balanced_src=False):
     # loading dataset file from path
     dataset_file = torch.load(os.path.join(data_path, f"{dtype}_{domain_id}.pt"))
 
     # Loading datasets
-    dataset = Load_Dataset(dataset_file, dataset_configs)
+    dataset = Load_Dataset(dataset_file, dataset_configs, encoder)
 
     if dtype == "test":  # you don't need to shuffle or drop last batch while testing
         shuffle  = False
@@ -73,12 +104,26 @@ def data_generator(data_path, domain_id, dataset_configs, hparams, dtype):
         drop_last = dataset_configs.drop_last
 
     # Dataloaders
-    data_loader = torch.utils.data.DataLoader(dataset=dataset, 
+    if balanced_src:
+        print("Source Mini-Batch is Balanced during training !")
+        class_sample_count = np.array(
+            [len(np.where(dataset.y_data == t)[0]) for t in np.unique(dataset.y_data)])
+        weight = 1. / class_sample_count
+        samples_weight = np.array([weight[t] for t in dataset.y_data])
+        samples_weight = torch.from_numpy(samples_weight)
+        samples_weight = samples_weight.double()
+        sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
+        data_loader = torch.utils.data.DataLoader(dataset=dataset,
+                                                  batch_size=hparams["batch_size"],
+                                                  drop_last=drop_last,
+                                                  sampler=sampler,
+                                                  num_workers=0)
+        return data_loader
+    data_loader = torch.utils.data.DataLoader(dataset=dataset,
                                               batch_size=hparams["batch_size"],
-                                              shuffle=shuffle, 
-                                              drop_last=drop_last, 
+                                              shuffle=shuffle,
+                                              drop_last=drop_last,
                                               num_workers=0)
-
     return data_loader
 
 
@@ -103,7 +148,7 @@ def data_generator_old(data_path, domain_id, dataset_configs, hparams):
 
 
 
-def few_shot_data_generator(data_loader, dataset_configs, num_samples=5):
+def few_shot_data_generator(data_loader, dataset_configs, encoder, num_samples=5):
     x_data = data_loader.dataset.x_data
     y_data = data_loader.dataset.y_data
 
@@ -120,7 +165,7 @@ def few_shot_data_generator(data_loader, dataset_configs, num_samples=5):
     selected_y = torch.cat([y_data[samples_ids[i][selected_ids[i]]] for i in range(NUM_CLASSES)], dim=0)
 
     few_shot_dataset = {"samples": selected_x, "labels": selected_y}
-    few_shot_dataset = Load_Dataset(few_shot_dataset, dataset_configs)
+    few_shot_dataset = Load_Dataset(few_shot_dataset, dataset_configs, encoder)
 
     few_shot_loader = torch.utils.data.DataLoader(dataset=few_shot_dataset, batch_size=len(few_shot_dataset),
                                                   shuffle=False, drop_last=False, num_workers=0)

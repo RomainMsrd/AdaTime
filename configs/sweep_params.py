@@ -11,6 +11,7 @@ sweep_train_hparams = {
 
 sweep_train_hparams2 = {
         'num_epochs':   {'values': [70, 160]},
+        'num_epochs_pr':{'values': [50, 100]},
         'batch_size':   {'values': [32, 64, 128]},
         'weight_decay': {'values': [1e-4]}
 }
@@ -117,5 +118,20 @@ sweep_alg_hparams = {
             "jdot_lambda":       {'distribution': 'uniform', 'min': 1e-3, 'max': 1},
             "ot_method":       {'values': ["emd"]},
         },
+
+        'PPOT': {
+                'learning_rate': {'values': [5e-2, 1e-2, 5e-3, 1e-3, 5e-4]},
+                'tau': {'values': [0.05, 0.1, 0.2, 0.3, 0.4]},
+                "tau1": {'values': [0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 0.9]},
+                "tau2": {'values': [0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 0.9]},
+                "alpha": {'values': [0.01, 0.001]},
+                "beta": {'values': [0.01, 0.001]},
+                "reg": {'values': [0.01, 0.1]},
+                "ot" : {'distribution': 'uniform', 'min': 1e-3, 'max': 1},
+                "p_entropy": {'distribution': 'uniform', 'min': 1e-3, 'max': 1},
+                "n_entropy": {'distribution': 'uniform', 'min': 1e-3, 'max': 1},
+                "neg" : {'values': [0.15, 0.2, 0.25, 0.3, 0.35]},
+            },
+
 }
 

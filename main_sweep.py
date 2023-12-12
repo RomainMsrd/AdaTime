@@ -8,7 +8,7 @@ import wandb
 if __name__ == "__main__":
     wandb.login()
     # ========= Select the DA methods ============
-    parser.add_argument('--da_method', default='MCD', type=str,
+    parser.add_argument('--da_method', default='PPOT', type=str,
                         help='DANN, Deep_Coral, WDGRL, MMDA, VADA, DIRT, CDAN, ADDA, HoMM, CoDATS, SWD, MCD, DeepJDOT')
 
     # ========= Select the DATASET ==============
@@ -17,6 +17,7 @@ if __name__ == "__main__":
 
     # ========= Select the BACKBONE ==============
     parser.add_argument('--backbone', default='CNN', type=str, help='Backbone of choice: (CNN - RESNET18 - TCN)')
+    parser.add_argument("--uniDA", action='store_true', help='Different Label Set between Src and Trg Domain ?')
 
     # ========= Experiment settings ===============
     parser.add_argument('--num_runs', default=4, type=int, help='Number of consecutive run with different seeds')
@@ -24,7 +25,7 @@ if __name__ == "__main__":
     parser.add_argument('--exp_name',     default='sweep_EXP1',         type=str, help='experiment name')
 
     # ======== sweep settings =====================
-    parser.add_argument('--num_sweeps', default=50, type=str, help='Number of sweep runs')
+    parser.add_argument('--num_sweeps', default=250, type=str, help='Number of sweep runs')
 
     # We run sweeps using wandb plateform, so next parameters are for wandb.
     parser.add_argument('--sweep_project_wandb', default='AdaTime_OT', type=str, help='Project name in Wandb')

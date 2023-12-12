@@ -31,6 +31,8 @@ class Trainer(AbstractTrainer):
         super().__init__(args)
 
         self.results_columns = ["scenario", "run", "acc", "f1_score", "auroc"]
+        if self.uniDA:
+            self.results_columns.append('H-score')
         self.risks_columns = ["scenario", "run", "src_risk", "few_shot_risk", "trg_risk"]
 
 

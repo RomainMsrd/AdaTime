@@ -274,6 +274,7 @@ def calculate_risk(target_model, risk_dataloader, device):
     return cls_loss.item()
 
 
+
 class DictAsObject:
     def __init__(self, d):
         self.__dict__ = d
