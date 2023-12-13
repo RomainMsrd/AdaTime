@@ -45,7 +45,7 @@ class Trainer(AbstractTrainer):
         self.exp_log_dir = os.path.join(self.home_path, self.save_dir)
         os.makedirs(self.exp_log_dir, exist_ok=True)
 
-    def sweep(self):
+    def sweep(self, sweep_id=None):
         # sweep configurations
         sweep_runs_count = self.num_sweeps
         sweep_config = {
@@ -54,7 +54,10 @@ class Trainer(AbstractTrainer):
             'name': self.da_method + '_' + self.backbone,
             'parameters': {**sweep_alg_hparams[self.da_method], **sweep_train_hparams2}
         }
-        self.sweep_id = wandb.sweep(sweep_config, project=self.sweep_project_wandb, entity=self.wandb_entity)
+        if sweep_id is None:
+            self.sweep_id = wandb.sweep(sweep_config, project=self.sweep_project_wandb, entity=self.wandb_entity)
+        else :
+            self.sweep_id = sweep_id
         """self.sweep_id = sweep_id
         if self.sweep_id is None:
             self.sweep_id = wandb.sweep(sweep_config, project=self.sweep_project_wandb, entity=self.wandb_entity)"""
