@@ -40,6 +40,7 @@ class Trainer(AbstractTrainer):
         self.wandb_entity = args.wandb_entity
         self.hp_search_strategy = args.hp_search_strategy
         self.metric_to_minimize = args.metric_to_minimize
+        self.uniDA = args.uniDA
 
         # Logging
         self.exp_log_dir = os.path.join(self.home_path, self.save_dir)
@@ -70,6 +71,10 @@ class Trainer(AbstractTrainer):
         print(self.hparams)
         # create tables for results and risks
         results_columns = ["scenario", "run", "acc", "f1_score", "auroc"]
+        if self.uniDA:
+            results_columns.append('H-score')
+            results_columns.append("acc_c")
+            results_columns.append("acc_p")
         #table_results = wandb.Table(columns=columns, allow_mixed_types=True)
         risks_columns = ["scenario", "run", "src_risk", "few_shot_risk", "trg_risk"]
         #table_risks = wandb.Table(columns=columns, allow_mixed_types=True)

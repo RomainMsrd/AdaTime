@@ -123,12 +123,13 @@ class AbstractTrainer(object):
 
                 # compute loss
                 if self.uniDA:
-                    m = torch.isin(labels, self.trg_private_class.view((-1)).long().to(self.device), invert=True)
-                    if src:
+                    if src and self.algorithm.is_uniDA:
                         corr_preds = self.algorithm.correct_predictions(predictions)
                         loss = F.cross_entropy(corr_preds, labels)
                         #loss = F.cross_entropy(predictions[m], labels[m])
                     else:
+                        #m = torch.isin(labels, self.trg_private_class.view((-1)).long().to(self.device), invert=True)
+                        m = torch.isin(labels.cpu(), self.trg_private_class, invert=True)
                         loss = F.cross_entropy(predictions[m], labels[m])
                 else:
                     loss = F.cross_entropy(predictions, labels)
@@ -198,33 +199,7 @@ class AbstractTrainer(object):
         if not os.path.exists(save_dir):
             os.mkdir(save_dir)
 
-    def calculate_metrics_risks(self):
-        # calculation based source test data
-        self.evaluate(self.src_test_dl, True)
-        src_risk = self.loss.item()
-        # calculation based few_shot test data
-        self.evaluate(self.few_shot_dl_5)
-        fst_risk = self.loss.item()
-        # calculation based target test data
-        self.evaluate(self.trg_test_dl)
-        trg_risk = self.loss.item()
 
-        # calculate metrics
-        acc = self.ACC(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
-        # f1_torch
-        f1 = self.F1(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
-        auroc = self.AUROC(self.full_preds.cpu(), self.full_labels.cpu()).item()
-
-        risks = src_risk, fst_risk, trg_risk
-        metrics = acc, f1, auroc
-        if self.uniDA:
-            mask = np.isin(self.full_preds.cpu(), self.trg_private_class)
-            self.full_labels[mask] = -1
-            H_score, acc_c, acc_p = self.H_score(self.full_preds.cpu(), self.full_labels.cpu())
-            metrics = acc, f1, auroc, H_score, acc_c, acc_p
-        # f1_sk learn
-        # f1 = f1_score(self.full_preds.argmax(dim=1).cpu().numpy(), self.full_labels.cpu().numpy(), average='macro')
-        return risks, metrics
 
     def save_tables_to_file(self,table_results, name):
         # save to file if needed
@@ -304,10 +279,7 @@ class AbstractTrainer(object):
         self.evaluate(self.trg_test_dl)
 
         if self.uniDA:
-            print("in")
             mask = np.isin(self.full_labels.cpu(), self.trg_private_class, invert=True)
-            m = torch.isin(self.full_labels, self.trg_private_class.view((-1)).long().to(self.device),
-                           invert=True).cpu()
 
             # accuracy
             acc = (self.full_preds.argmax(dim=1).cpu() == self.full_labels.cpu()).numpy().mean()

@@ -10,7 +10,7 @@ sweep_train_hparams = {
 }
 
 sweep_train_hparams2 = {
-        'num_epochs':   {'values': [70, 160]},
+        'num_epochs':   {'values': [70, 160, 250]},
         'num_epochs_pr':{'values': [50, 100]},
         'batch_size':   {'values': [32, 64, 128]},
         'weight_decay': {'values': [1e-4]}

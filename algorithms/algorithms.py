@@ -43,6 +43,7 @@ class Algorithm(torch.nn.Module):
         self.feature_extractor = backbone(configs)
         self.classifier = classifier(configs)
         self.network = nn.Sequential(self.feature_extractor, self.classifier)
+        self.is_uniDA = False
 
 
     # update function is common to all algorithms
@@ -1513,6 +1514,7 @@ class PPOT(Algorithm):
         self.beta = 0
 
         self.softmax = torch.nn.Softmax()
+        self.is_uniDA = True
 
 
     def get_features(self, dataloader):
@@ -1818,6 +1820,7 @@ class JPOT(Algorithm):
 
         self.softmax = torch.nn.Softmax()
         self.pseudo_inv = PseudoInverse()
+        self.is_uniDA = True
 
     def classifier_cat_loss(self, src_y, trg_pred):
         '''

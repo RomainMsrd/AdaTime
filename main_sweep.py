@@ -9,7 +9,7 @@ import os
 if __name__ == "__main__":
     wandb.login()
     # ========= Select the DA methods ============
-    parser.add_argument('--da_method', default='JPOT', type=str,
+    parser.add_argument('--da_method', default='DeepJDOT', type=str,
                         help='DANN, Deep_Coral, WDGRL, MMDA, VADA, DIRT, CDAN, ADDA, HoMM, CoDATS, SWD, MCD, DeepJDOT')
 
     # ========= Select the DATASET ==============
