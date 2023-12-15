@@ -19,19 +19,22 @@ class Load_Dataset(Dataset):
         x_data = dataset["samples"]
 
         # Load labels
-        y_data = dataset.get("labels")
+        y_data = np.array(dataset["labels"]).copy()
+
 
         #Extend Encoder if necessary (new classes)
         if not encoder is None:
-            diff = len(np.unique(y_data)) - len(encoder)
+            self.encoder = encoder.copy()
+            #diff = len(np.unique(y_data)) - len(encoder)
+            diff = len(self.encoder) - (max(y_data)+1)# - len(encoder)
             if diff > 0:
                 print("Private Target Classes Detected")
-                encoder = np.concatenate([encoder, np.zeros(diff, dtype=int) - 1])
+                self.encoder = np.concatenate([self.encoder, np.zeros(diff, dtype=int) - 1])
             for gt in np.unique(y_data):
-                encoder[gt] = max(encoder) + 1 if encoder[gt] == -1 else encoder[gt]
+                #print("gt : ", max(self.encoder) + 1 if self.encoder[gt] == -1 else self.encoder[gt])
+                self.encoder[gt] = max(self.encoder) + 1 if self.encoder[gt] == -1 else self.encoder[gt]
             #Encode Labels
-            y_data = encoder[y_data]
-            self.encoder = encoder
+            y_data = self.encoder[y_data]
 
         if y_data is not None and isinstance(y_data, np.ndarray):
             y_data = torch.from_numpy(y_data)
@@ -76,10 +79,10 @@ def get_label_encoder(data_path, domain_id, dataset_configs, hparams, dtype):
     dataset_file = torch.load(os.path.join(data_path, f"{dtype}_{domain_id}.pt"))
 
     uni = np.unique(dataset_file["labels"])
+    print("Uni : ", uni)
     if len(uni) != dataset_configs.num_classes:
         print("Private Classes Detected in Source")
         dataset_configs.num_classes = len(uni)
-
     encoder = np.zeros(max(uni) + 1, dtype=int) - 1
     for i, k in enumerate(uni):
         encoder[k] = i
@@ -165,6 +168,7 @@ def few_shot_data_generator(data_loader, dataset_configs, encoder, num_samples=5
     selected_y = torch.cat([y_data[samples_ids[i][selected_ids[i]]] for i in range(NUM_CLASSES)], dim=0)
 
     few_shot_dataset = {"samples": selected_x, "labels": selected_y}
+    encoder = np.arange(len(encoder))
     few_shot_dataset = Load_Dataset(few_shot_dataset, dataset_configs, encoder)
 
     few_shot_loader = torch.utils.data.DataLoader(dataset=few_shot_dataset, batch_size=len(few_shot_dataset),
