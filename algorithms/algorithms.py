@@ -1646,6 +1646,8 @@ class PPOT(Algorithm):
             for params in list(head.parameters()):
                 params.requires_grad = False
             trg_pred = self.softmax(head(trg_feat))
+            assert not (torch.isnan(src_feat).any() or torch.isnan(src_pred).any())
+            assert not (torch.isnan(trg_feat).any() or torch.isnan(trg_pred).any())
 
             #print("trg_pred : ", trg_pred)
             conf,_ = torch.max(trg_pred, dim=1)
@@ -1655,9 +1657,10 @@ class PPOT(Algorithm):
 
             #update alpha by moving average
             self.alpha = (1 - self.hparams['alpha']) * self.alpha + self.hparams['alpha'] * (conf >= self.hparams['tau1']).sum().item() / conf.size(0)
-            #self.alpha = min(self.alpha, 0.999)
+            self.alpha = max(self.alpha, 1e-3)
             # get alpha / beta
             match = self.alpha / self.beta
+            assert not np.isnan(match)
             #match = max(match, self.alpha+0.001)
             print("alpha/beta : ", match)
 
@@ -1678,11 +1681,13 @@ class PPOT(Algorithm):
             #with torch.no_grad():
             a, b = match * ot.unif(self.num_classes), ot.unif(batch_size)
             m = torch.cdist(self.src_prototype, trg_feat) ** 2
+            assert not torch.isnan(m).any()
             m_max = m.max().detach()
             m = m / m_max
             pi, log = ot.partial.entropic_partial_wasserstein(a, b, m.detach().cpu().numpy(), reg=self.hparams["reg"], m=self.alpha,
                                                                   stopThr=1e-10, log=True)
             pi = torch.from_numpy(pi).float().to(self.device)
+            assert not torch.isnan(pi).any()
             ot_loss = torch.sqrt(torch.sum(pi * m) * m_max)
             loss = self.hparams['ot'] * ot_loss
 
@@ -1713,6 +1718,7 @@ class PPOT(Algorithm):
 
             # update beta
             self.beta = self.hparams['beta'] * (self.class_weight > self.hparams['tau2']).sum().item() / self.num_classes + (1 - self.hparams['beta']) * self.beta
+            self.beta = max(self.beta, 1e-3)#1e-1)
             #self.beta = min(self.beta, 0.999)
 
             # get classification loss
@@ -1750,6 +1756,36 @@ class PPOT(Algorithm):
         res = preds.argmax(dim=1)
         res[mask] = -1"""
         return pred
+    def correct_predictions(self, preds):
+        print("Correction")
+        preds = self.softmax(preds)
+        confidence, pred = preds.max(dim=1)
+        preds[confidence < self.hparams["thresh"]] *= 0
+        return preds
+class PseudoInverse(nn.Module):
+    def __init__(self, k=5):
+        super(PseudoInverse, self).__init__()
+        self.k = k
+
+    def forward(self, X):
+        """
+        Compute the pseudo-inverse of a matrix using SVD and keeping K principal components.
+
+        Parameters:
+        - X: Input matrix (PyTorch tensor).
+
+        Returns:
+        - X_pseudo_inv: Pseudo-inverse of the input matrix (PyTorch tensor).
+        """
+        eps = 1e-6
+        U, S, V = torch.svd(X.t())
+        self.k = torch.sum(S > torch.finfo(S.dtype).eps).item()
+        #print("K : ", self.k)
+        #self.k = min(self.k, torch.sum(S > torch.finfo(S.dtype).eps).item())
+        U_k = U[:, :self.k]
+        S_k_inv = torch.diag(1.0 / (S[:self.k]))#+eps))
+        X_pseudo_inv = torch.mm(U_k, torch.mm(S_k_inv, U_k.t()))
+        return X_pseudo_inv
 
 class JPOT(Algorithm):
     def __init__(self, backbone, configs, hparams, device):
@@ -1781,6 +1817,7 @@ class JPOT(Algorithm):
         )
 
         self.softmax = torch.nn.Softmax()
+        self.pseudo_inv = PseudoInverse()
 
     def classifier_cat_loss(self, src_y, trg_pred):
         '''
@@ -1794,17 +1831,22 @@ class JPOT(Algorithm):
         return torch.sum(self.gamma * label_loss)
 
 
-    def mahalanobis2(self, feats, mean, cov):
-        a = feats-mean
-        inv_cov = torch.cholesky_inverse(cov)
-        t = torch.matmul(a.T,torch.matmul(inv_cov,a)).sqrt()
-        print(a.shape, inv_cov.shape, torch.matmul(inv_cov,a).shape)
-        return torch.matmul(a,torch.matmul(inv_cov,a.T)).sqrt()
-
     def mahalanobis(self, feats, mean, cov):
         delta = feats - mean
-        m = torch.dot(delta, torch.matmul(torch.pinverse(cov), delta))
+        pinv = cov#torch.cholesky_inverse(cov)
+        '''assert not torch.isnan(delta).any()
+        assert not torch.isnan(pinv).any()
+        ddot = torch.matmul(pinv, delta)
+        assert not torch.isnan(ddot).any()
+        m = torch.dot(delta, ddot)'''
+        m = torch.sum(((delta @ pinv) * delta), axis=-1)
         return torch.sqrt(m)
+
+    def mahalanobis_tensor(self, feats, mean, cov):
+        delta = feats - mean
+        cinv = cov#torch.pinverse(cov)
+        mahalanobis_dist = torch.sqrt(torch.einsum('ij,ij->i', [delta.mm(cinv), delta]))
+        return mahalanobis_dist
 
     # L2 distance
     def L2_dist(self, x, y):
@@ -1830,6 +1872,13 @@ class JPOT(Algorithm):
     def to_categorical(self, y):
         """ 1-hot encodes a tensor """
         return torch.eye(self.nb_classes, dtype=torch.int8)[y]
+
+    """def pseudo_inv(self, X, k=3):
+        U, S, V = torch.svd(X.t())
+        U_k = U[:, :k]
+        S_k_inv = torch.diag(1.0 / S[:k])
+        X_pseudo_inv = torch.mm(U_k, torch.mm(S_k_inv, U_k.t()))
+        return X_pseudo_inv"""
 
     def update(self, src_loader, trg_loader, avg_meter, logger):
         # defining best and last model
@@ -1900,7 +1949,7 @@ class JPOT(Algorithm):
             for _, (data, label) in enumerate(dataloader):
                 data = data.to(self.device)
                 feature = self.feature_extractor(data)
-                pred = self.classifier(feature)
+                pred = self.softmax(self.classifier(feature))
                 feature_set.append(feature)
                 label_set.append(label)
                 pred_set.append(pred)
@@ -1912,6 +1961,7 @@ class JPOT(Algorithm):
 
     def get_prototypes(self, src_dataloader, trg_dataloader) -> torch.Tensor:
         feature_set, label_set, pred_set = self.get_features(src_dataloader)
+        #feature_set = F.normalize(feature_set, p=2, dim=-1)
 
         mean_A = torch.zeros(self.nb_classes + 1, feature_set.shape[-1]).to(self.device)
         covVar_A = torch.zeros(self.nb_classes + 1, feature_set.shape[-1], feature_set.shape[-1]).to(self.device)
@@ -1923,12 +1973,16 @@ class JPOT(Algorithm):
                 else:"""
                 mean_A[i] = feature_set[label_set == i].mean(axis=0)  # .view(1, -1)
                 # covVar_A[i] = 1/max(1 ,(feats.shape[0] - 1)) * torch.matmul((feats - mean_A[i]).T, (feats - mean_A[i]))
-                covVar_A[i] = torch.cov(feature_set[label_set == i].T)
+                covVar_A[i] = self.pseudo_inv(feature_set[label_set == i])#torch.cov(feature_set[label_set == i].T)
                 # assert torch.isnan(torch.pinverse(covVar_A[i])).sum() == 0
 
-        #feature_set, label_set, pred_set = self.get_features(trg_dataloader)
-        #mean_A[-1] = feature_set.mean(axis=0)  # .view(1, -1)
-        #covVar_A[-1] = torch.cov(feature_set.T)
+        feature_set, label_set, pred_set = self.get_features(trg_dataloader)
+        confidence, pred = pred_set.max(dim=1)
+        q = torch.quantile(confidence, 2*(1-self.hparams["qt"]))
+        mask = confidence < q
+        print("Number mask : ", mask.sum())
+        mean_A[-1] = feature_set[mask].mean(axis=0)  # .view(1, -1)
+        covVar_A[-1] = self.pseudo_inv(feature_set[mask])
         self.mean_A = mean_A
         self.covVar_A = covVar_A
     def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
@@ -1948,6 +2002,8 @@ class JPOT(Algorithm):
             src_x, src_y, trg_x = src_x.to(self.device), src_y.to(self.device), trg_x.to(
                 self.device)  # extract source features
 
+            '''for p in list(self.classifier.parameters()) + list(self.feature_extractor.parameters()):
+                p.requires_grad = False'''
             # extract source features
             src_feat = self.feature_extractor(src_x)
             src_pred = self.classifier(src_feat)
@@ -1959,96 +2015,125 @@ class JPOT(Algorithm):
                 p.requires_grad = False
             trg_pred = head(trg_feat)
 
+            assert not (torch.isnan(src_feat).any() or torch.isnan(src_pred).any())
+            assert not (torch.isnan(trg_feat).any() or torch.isnan(trg_pred).any())
             #trg_feat = F.normalize(trg_feat, p=2, dim=-1)
             #src_feat = F.normalize(src_feat, p=2, dim=-1)
 
             src_y_hot = torch.eye(self.nb_classes, dtype=torch.int8).to(self.device)[src_y]
-
+            #with torch.no_grad():
             C0 = torch.cdist(src_feat, trg_feat, p=2.0) ** 2
             #C1 = torch.cdist(src_y_hot.double(), self.softmax(trg_pred).double(),p=2.0) ** 2
             #C = self.hparams['jdot_alpha'] * C0 #+ self.hparams['jdot_lambda'] * C1
             C = C0
             # self.gamma = ot.sinkhorn(torch.Tensor([]).to(self.device), torch.Tensor([]).to(self.device), C, reg=0.001)
             #self.gamma = ot.sinkhorn(torch.zeros(C.shape[0]).to(self.device)+1, torch.zeros(C.shape[1]).to(self.device)+1, C, reg=0.1) #* src_feat.shape[0]
-            self.gamma = ot.sinkhorn(torch.Tensor([]).to(self.device), torch.Tensor([]).to(self.device), C, reg=0.01)
+            self.gamma = ot.sinkhorn(torch.Tensor([]).to(self.device), torch.Tensor([]).to(self.device), C.detach().cpu(), reg=self.hparams["reg"])
+            assert not torch.isnan(C).any()
+            assert not torch.isnan(self.gamma).any()
+            self.gamma = self.gamma.to(self.device)
             #self.gamma = ot.emd(torch.Tensor([]).to(self.device), torch.Tensor([]).to(self.device), C)
-            rho = (self.gamma*C).mean() #.sum(axis=0)/src_x.shape[0]
-            h = 1 - 0.5 * (1 + torch.sign(C - rho))
+            rho = torch.quantile(self.gamma, self.hparams['qt']) #.sum(axis=0)/src_x.shape[0]
+            assert not torch.isnan(self.gamma).any()
+            h = 1 - 0.5 * (1 + torch.sign(self.gamma - rho))
             gamma_k = self.gamma * h
             gamma_u = self.gamma - gamma_k
-            print("Rho : ", rho)
-            print("Cost : ", (self.gamma * C)[:5, :5], C.min(), C.max(), (self.gamma * C).sum())
-            print("h : ", h.sum())
+            #print("Rho : ", rho)
+            #print("Cost : ", C.min(), C.max(), (self.gamma * C).sum())
+            #print("h : ", h.mean())
             print("Gamma K sum : ", gamma_k.sum())
             print("Gamma U sum : ", gamma_u.sum())
 
-            #assert False
-
-            '''# extract source features
-            src_feat = self.feature_extractor(src_x)
-            src_pred = self.classifier(src_feat)
-            # extract target features
-            trg_feat = self.feature_extractor(trg_x)
-            trg_pred = self.classifier(trg_feat)'''
 
             # Losses
-            loss_ot_k = torch.sum(self.gamma * self.L2_dist(src_feat, trg_feat))
-            loss_ot_u = 1 / self.nu * torch.sum(
-                gamma_u * torch.log(1 + torch.exp(-1 * self.nu * self.L2_dist(src_feat, trg_feat)**2)))
+            l2 = self.L2_dist(src_feat, trg_feat)
+            loss_ot_k = torch.sum(self.gamma * l2)
+            loss_ot_u = 1 / self.nu * torch.sum(gamma_u * torch.log(1 + torch.exp(-1 * self.nu * self.L2_dist(src_feat, trg_feat))))
             l_p = loss_ot_k + loss_ot_u
+            assert not torch.isnan(l_p).any()
+            assert not torch.isnan(l2).any()
 
             l_cls = self.cross_entropy(src_pred, src_y)
 
             # Compute Mean and Cov
-            mean_A = torch.zeros(self.nb_classes + 1, src_feat.shape[-1]).to(self.device)
-            covVar_A = torch.zeros(self.nb_classes + 1, src_feat.shape[-1], src_feat.shape[-1]).to(self.device)
+            #with torch.no_grad():
+            self.mean_A = self.mean_A.to(self.device)
+            self.covVar_A = self.covVar_A.to(self.device)
+            mean_A = self.mean_A #torch.zeros(self.nb_classes + 1, src_feat.shape[-1]).to(self.device)
+            covVar_A = self.covVar_A #torch.zeros(self.nb_classes + 1, src_feat.shape[-1], src_feat.shape[-1]).to(self.device)
+            #mean_A, covVar_A = self.mean_A.copy(), self.covVar_A.copy()
             for i in list(range(self.nb_classes)):
-                if (src_y == i).sum().item() != 0:
-                    """if len(src_y==i) == 1:
-                        mean_A[i] = feats
-                        covVar_A[i] = torch.var(feats)
-                    else:"""
-                    feats = src_feat[src_y == i]
-                    mean_A[i] = feats.mean(axis=0)  # .view(1, -1)
+                feats = src_feat[src_y == i]
+                if (src_y == i).sum().item() > 1 :
+                    mean_A[i] = feats.mean(axis=0)
+                    #covVar_A[i] = torch.cov(feats.T)
+                    self.mean_A[i] = self.m * self.mean_A[i] + (1 - self.m) * feats.mean(axis=0)
+                    #mean_A[i] = feats.mean(axis=0)  # .view(1, -1)
                     # covVar_A[i] = 1/max(1 ,(feats.shape[0] - 1)) * torch.matmul((feats - mean_A[i]).T, (feats - mean_A[i]))
-                    covVar_A[i] = torch.cov(feats.T)
+                    self.covVar_A[i] = self.m *  self.covVar_A[i] + (1 - self.m) * self.pseudo_inv(feats) #torch.cov(feats.T)
+                elif (src_y == i).sum().item() == 1 :
+                    #mean_A[i] = feats.mean(axis=0)
+                    self.mean_A[i] = self.m * self.mean_A[i] + (1 - self.m) * feats.mean(axis=0)
                     # assert torch.isnan(torch.pinverse(covVar_A[i])).sum() == 0
                 feats = trg_feat[gamma_u.sum(axis=0).int()] if gamma_u.sum(axis=0).sum().item() != 0 else None#trg_feat
                 if not feats is None:
-                    mean_A[-1] = feats.mean(axis=0)  # .view(1, -1)
-                    covVar_A[-1] = torch.cov(feats.T)
+                    if feats.shape[0] == 1:
+                        #mean_A[-1] = feats
+                        self.mean_A[-1] = self.m * self.mean_A[-1] + (1 - self.m) * feats  # .view(1, -1)
+                    if feats.shape[0] > 1:
+                        #covVar_A[-1] = torch.cov(feats.T)
+                        self.mean_A[-1] = self.m * self.mean_A[-1] + (1 - self.m) * feats.mean(axis=0)
+                        self.covVar_A[-1] = self.m * self.covVar_A[-1] + (1 - self.m) * self.pseudo_inv(feats) #torch.cov(feats.T)
                 # covVar_A[-1] = 1 / (feats.shape[0] - 1) * torch.matmul((feats - mean_A[-1]).T, (feats - mean_A[-1]))
-
+            #self.mean_A = F.normalize(self.mean_A, p=2, dim=-1)
+            #self.covVar_A = F.normalize(self.covVar_A, p=2, dim=-1)
+            assert not torch.isnan(mean_A).any()
+            assert not torch.isnan(covVar_A).any()
             # Update Mean and Cov
-            if self.mean_A is None and self.covVar_A is None:
-                self.mean_A = mean_A
-                self.covVar_A = covVar_A
-            else:
-                self.mean_A = self.m * self.mean_A + (1 - self.m) * mean_A
-                self.covVar_A = self.m * self.covVar_A + (1 - self.m) * covVar_A
 
-            D_trg = torch.zeros(mean_A.shape[0], trg_x.shape[0]).to(self.device)
-            for z in range(mean_A.shape[0]):
+                #self.mean_A = self.m * self.mean_A + (1 - self.m) * mean_A
+                #self.covVar_A = self.m * self.covVar_A + (1 - self.m) * covVar_A
+
+            D_trg = torch.zeros(self.mean_A.shape[0], trg_x.shape[0]).to(self.device)
+            """for z in range(self.mean_A.shape[0]):
+                if self.covVar_A[z].sum() != 0:
+                    D_trg[z] = self.mahalanobis_tensor(trg_feat, self.mean_A[z], self.covVar_A[z])"""
+
+            for z in range(self.mean_A.shape[0]):
                 for j in range(trg_x.shape[0]):
-                    d = (trg_feat[j]-mean_A[z]).square().sum()
-                    d_exp = torch.exp(-1*d)
-                    D_trg[z,j] = -1*d_exp #self.mahalanobis(trg_feat[j], mean_A[z], covVar_A[z])
+                    if covVar_A[z].sum():
+                        D_trg[z, j] = 0
+                    else:
+                        D_trg[z, j] = -1 * (trg_feat[j] - self.mean_A[z]).square().sum()
+                        # -1 * self.mahalanobis(trg_feat[j], self.mean_A[z], self.covVar_A[z])
+
+                    #D_trg[z, j] = -1 * (trg_feat[j] - mean_A[z]).square().sum()
+                    #d = self.mahalanobis(trg_feat[j], self.mean_A[z], self.covVar_A[z])
+                    #D_trg[z, j] = -1*(trg_feat[j]-mean_A[z]).square().sum()
+                    #d_exp = torch.exp(-1*d)
+                    #D_trg[z,j] = -1*d_exp #self.mahalanobis(trg_feat[j], mean_A[z], covVar_A[z])
+            #assert not np.isnan(D_trg).any()
+            #assert not torch.isnan(D_trg).any()
+            #D_trg = torch.Tensor(D_trg).to(self.device)
             #D_trg2 = torch.zeros_like(D_trg).to(self.device)
 
             #D_trg = -1 * torch.cdist(trg_feat, mean_A)
             #D_trg = -1*cdist(trg_feat.detach().cpu(), mean_A.detach().cpu(), 'mahalanobis', VI=covVar_A.detach().cpu())
             #D_trg = torch.Tensor(D_trg).to(self.device)
-            D_trg = self.softmax(D_trg)
+            D_trg_soft = self.softmax(D_trg+1e-12)
+            #print(D_trg_soft)
+            assert not torch.isnan(D_trg).any()
 
-            l_dc = (src_feat - mean_A[src_y]).square().sum()
+            l_dc = (src_feat - self.mean_A[src_y]).square().sum()
             l_dp = 0
             for i in range(self.nb_classes):
                 fake_labels = torch.Tensor([i] * len(src_y)).to(self.device)
-                ll = D_trg[i] * self.cross_entropy(self.softmax(trg_pred), fake_labels.long())
+                ll = D_trg_soft[i] * self.cross_entropy(self.softmax(trg_pred), fake_labels.long())
                 l_dp += ll
             # l_dp = torch.Tensor([D_trg[i]*self.cross_entropy(self.softmax(trg_pred), i) for i in range(self.nb_classes+1)]).to(self.device)
             l_dp = l_dp.sum()
             l_d = l_dc + l_dp
+            assert not (torch.isnan(l_dp).any() or torch.isnan(l_dc).any())
             # Compute Losses
             src_cls_loss = self.cross_entropy(src_pred, src_y)
             total_loss = l_cls + self.hparams['alpha'] * l_p + self.hparams['beta'] * l_d
@@ -2064,10 +2149,29 @@ class JPOT(Algorithm):
                       'Reweighted Loss': self.hparams['beta'] * l_d.item(),
                       'Src_cls_loss': src_cls_loss.item()}
 
+            self.mean_A = mean_A.detach().cpu()
+            self.covVar_A = covVar_A.detach().cpu()
+
+
             for key, val in losses.items():
                 avg_meter[key].update(val, 32)
 
+    def decision_function(self, preds):
+        preds = self.softmax(preds)
+        confidence, pred = preds.max(dim=1)
+        pred[confidence < self.hparams["thresh"]] = -1
 
+        """mask = preds.max()< self.hparams["thresh"]
+        res = preds.argmax(dim=1)
+        res[mask] = -1"""
+        return pred
+
+    def correct_predictions(self, preds):
+        print("Correction")
+        preds = self.softmax(preds)
+        confidence, pred = preds.max(dim=1)
+        preds[confidence < self.hparams["thresh"]] *= 0
+        return preds
         # self.lr_scheduler_fe.step()
         # self.lr_scheduler_c1.step()
         # self.lr_scheduler_c2.step()

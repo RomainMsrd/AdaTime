@@ -94,10 +94,12 @@ class WISDM(object):
         self.scenarios = [("7", "18"), ("20", "30"), ("35", "31"), ("17", "23"), ("6", "19"),
                           ("2", "11"), ("33", "12"), ("5", "26"), ("28", "4"), ("23", "32")]
 
-        #Open Set Scenario
-        #self.scenarios = [("29", "20"), ("0", "34")]
+        self.scenarios = [('29','7'),('14','3'),('1','2'),('25','9'),('25','7'),('22','11'),('22','32'),('25','4'),('14','32'),('1','12')]
 
-        self.scenarios = [("35", "31")]
+        #Open Set Scenario
+        self.scenarios = [("29", "20"), ("0", "34")]
+
+        #self.scenarios = [("35", "31")]
         self.num_classes = 6
         self.shuffle = True
         self.drop_last = False
@@ -139,6 +141,7 @@ class HHAR(object):  ## HHAR dataset, SAMSUNG device.
         self.sequence_len = 128
         self.scenarios = [("0", "6"), ("1", "6"), ("2", "7"), ("3", "8"), ("4", "5"),
                           ("5", "0"), ("6", "1"), ("7", "4"), ("8", "3"), ("0", "2")]
+        self.scenarios = [("0", "6")]
         self.class_names = ['bike', 'sit', 'stand', 'walk', 'stairs_up', 'stairs_down']
         self.num_classes = 6
         self.shuffle = True

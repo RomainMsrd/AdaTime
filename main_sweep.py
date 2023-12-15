@@ -2,22 +2,23 @@ from trainers.sweep import Trainer
 import argparse
 parser = argparse.ArgumentParser()
 import wandb
-
+import os
+#os.environ["WANDB_MODE"]="offline"
 
 
 if __name__ == "__main__":
     wandb.login()
     # ========= Select the DA methods ============
-    parser.add_argument('--da_method', default='PPOT', type=str,
+    parser.add_argument('--da_method', default='JPOT', type=str,
                         help='DANN, Deep_Coral, WDGRL, MMDA, VADA, DIRT, CDAN, ADDA, HoMM, CoDATS, SWD, MCD, DeepJDOT')
 
     # ========= Select the DATASET ==============
     parser.add_argument('--data_path', default=r'./ADATIME_data', type=str, help='Path containing dataset')
-    parser.add_argument('--dataset', default='HHAR', type=str, help='Dataset of choice: (WISDM - EEG - HAR - HHAR_SA)')
+    parser.add_argument('--dataset', default='WISDM', type=str, help='Dataset of choice: (WISDM - EEG - HAR - HHAR_SA)')
 
     # ========= Select the BACKBONE ==============
     parser.add_argument('--backbone', default='CNN', type=str, help='Backbone of choice: (CNN - RESNET18 - TCN)')
-    parser.add_argument("--uniDA", action='store_true', help='Different Label Set between Src and Trg Domain ?')
+    parser.add_argument("--uniDA", action='store_false', help='Different Label Set between Src and Trg Domain ?')
 
     # ========= Experiment settings ===============
     parser.add_argument('--num_runs', default=4, type=int, help='Number of consecutive run with different seeds')
@@ -44,5 +45,5 @@ if __name__ == "__main__":
 
     trainer = Trainer(args)
 
-    trainer.sweep(sweep_id="oddteam/AdaTime_OT/3q9qopbr")
-    #trainer.sweep()
+    #trainer.sweep(sweep_id="oddteam/AdaTime_OT/3q9qopbr")
+    trainer.sweep()

@@ -1,9 +1,11 @@
 from trainers.train import Trainer
 
 import argparse
+import time
 parser = argparse.ArgumentParser()
 
 if __name__ == "__main__":
+    start_time = time.time()
 
     # ========  Experiments Phase ================
     parser.add_argument('--phase',               default='train',         type=str, help='train, test')
@@ -17,7 +19,7 @@ if __name__ == "__main__":
 
     # ========= Select the DATASET ==============
     parser.add_argument('--data_path',              default=r'./ADATIME_data',                  type=str, help='Path containing datase2t')
-    parser.add_argument('--dataset',                default='HHAR',                      type=str, help='Dataset of choice: (WISDM - EEG - HAR - HHAR_SA)')
+    parser.add_argument('--dataset',                default='WISDM',                      type=str, help='Dataset of choice: (WISDM - EEG - HAR - HHAR_SA)')
 
     # ========= Select the BACKBONE ==============
     parser.add_argument('--backbone',               default='CNN',                      type=str, help='Backbone of choice: (CNN - RESNET18 - TCN)')
@@ -25,7 +27,7 @@ if __name__ == "__main__":
     # ========= Experiment settings ===============
     parser.add_argument('--num_runs',               default=1,                          type=int, help='Number of consecutive run with different seeds')
     parser.add_argument('--device',                 default= "cuda",                   type=str, help='cpu or cuda')
-    parser.add_argument("--uniDA",                  action='store_true', help='Different Label Set between Src and Trg Domain ?')
+    parser.add_argument("--uniDA",                  action='store_false', help='Different Label Set between Src and Trg Domain ?')
 
     # arguments
     args = parser.parse_args()
@@ -38,6 +40,8 @@ if __name__ == "__main__":
         trainer.fit()
     elif args.phase == 'test':
         trainer.test()
+
+    print("--- %s seconds ---" % (time.time() - start_time))
 
 
 

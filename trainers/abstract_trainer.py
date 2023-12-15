@@ -103,7 +103,7 @@ class AbstractTrainer(object):
         self.last_model, self.best_model = self.algorithm.update(self.src_train_dl, self.trg_train_dl, self.loss_avg_meters, self.logger)
         return self.last_model, self.best_model
 
-    def evaluate(self, test_loader):
+    def evaluate(self, test_loader, src=False):
         feature_extractor = self.algorithm.feature_extractor.to(self.device)
         classifier = self.algorithm.classifier.to(self.device)
 
@@ -124,11 +124,16 @@ class AbstractTrainer(object):
                 # compute loss
                 if self.uniDA:
                     m = torch.isin(labels, self.trg_private_class.view((-1)).long().to(self.device), invert=True)
-                    loss = F.cross_entropy(predictions[m], labels[m])
+                    if src:
+                        corr_preds = self.algorithm.correct_predictions(predictions)
+                        loss = F.cross_entropy(corr_preds, labels)
+                        #loss = F.cross_entropy(predictions[m], labels[m])
+                    else:
+                        loss = F.cross_entropy(predictions[m], labels[m])
                 else:
                     loss = F.cross_entropy(predictions, labels)
                 total_loss.append(loss.detach().cpu().item())
-                predictions = self.algorithm.correct_predictions(predictions)
+                #predictions = self.algorithm.correct_predictions(predictions)
                 pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
 
                 # append predictions and labels
@@ -160,7 +165,7 @@ class AbstractTrainer(object):
             H = torch.Tensor([0])
         else:
             H = 2 * acc_c * acc_p / (acc_p + acc_c)
-        return H
+        return H, acc_c, acc_p
 
     def get_configs(self):
         dataset_class = get_dataset_class(self.dataset)
@@ -195,7 +200,7 @@ class AbstractTrainer(object):
 
     def calculate_metrics_risks(self):
         # calculation based source test data
-        self.evaluate(self.src_test_dl)
+        self.evaluate(self.src_test_dl, True)
         src_risk = self.loss.item()
         # calculation based few_shot test data
         self.evaluate(self.few_shot_dl_5)
@@ -215,8 +220,8 @@ class AbstractTrainer(object):
         if self.uniDA:
             mask = np.isin(self.full_preds.cpu(), self.trg_private_class)
             self.full_labels[mask] = -1
-            H_score = self.H_score(self.full_preds.cpu(), self.full_labels.cpu())
-            metrics = acc, f1, auroc, H_score
+            H_score, acc_c, acc_p = self.H_score(self.full_preds.cpu(), self.full_labels.cpu())
+            metrics = acc, f1, auroc, H_score, acc_c, acc_p
         # f1_sk learn
         # f1 = f1_score(self.full_preds.argmax(dim=1).cpu().numpy(), self.full_labels.cpu().numpy(), average='macro')
         return risks, metrics
@@ -305,16 +310,22 @@ class AbstractTrainer(object):
                            invert=True).cpu()
 
             # accuracy
-            acc = self.ACC(self.full_preds[mask].argmax(dim=1).cpu(), self.full_labels[mask].cpu()).item()
+            acc = (self.full_preds.argmax(dim=1).cpu() == self.full_labels.cpu()).numpy().mean()
+            #acc = self.ACC(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
+
             # f1
             f1 = self.F1(self.full_preds[mask].argmax(dim=1).cpu(), self.full_labels[mask].cpu()).item()
             # auroc
             auroc = self.AUROC(self.full_preds[mask].cpu(), self.full_labels[mask].cpu()).item()
 
             self.full_labels[~mask] = -1
-            H_score = self.H_score(self.full_preds.cpu(), self.full_labels.cpu()).item()
+            H_score, acc_c, acc_p = self.H_score(self.full_preds.cpu(), self.full_labels.cpu())
+            H_score, acc_c, acc_p = H_score.item(), acc_c.item(), acc_p.item()
             print("H_score : ", H_score)
-            return acc, f1, auroc, H_score
+            print("Acc_C : ", acc_c)
+            print("Acc_P : ", acc_p)
+
+            return acc, f1, auroc, H_score, acc_c, acc_p
 
         # accuracy  
         acc = self.ACC(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
@@ -328,7 +339,7 @@ class AbstractTrainer(object):
 
     def calculate_risks(self):
          # calculation based source test data
-        self.evaluate(self.src_test_dl)
+        self.evaluate(self.src_test_dl, True)
         src_risk = self.loss.item()
         # calculation based few_shot test data
         self.evaluate(self.few_shot_dl_5)

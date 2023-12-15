@@ -228,7 +228,7 @@ class WISDM():
     def __init__(self):
         super().__init__()
         self.train_params = {
-            'num_epochs': 70*2,
+            'num_epochs': 25,#70*2*3,
             'num_epochs_pr':50,
             'batch_size': 64*2,#32, #32,
             'weight_decay': 1e-4,
@@ -337,28 +337,25 @@ class WISDM():
             'PPOT': {
                 'learning_rate': 5e-4,
                 'tau': 0.05,
-                "tau1": 0.8,
+                "tau1": 0.9,
                 "tau2": 1,
-                "alpha": 0.01,
+                "alpha": 0.001,
                 "beta": 0.001,
                 "reg": 0.1,
                 "ot" : 5,
                 "p_entropy": 0.02,
                 "n_entropy": 2,
                 "neg" : 0.25,
-                "thresh" : 0.6,
+                "thresh" : 0.5,
             },
             'JPOT': {
                 'learning_rate': 5e-4,
-                "jdot_alpha": 5,
-                "jdot_lambda": 0.05,
-                "alpha" : 1,
-                "beta" : 0.1,
-                'nu': 0.1,
-                'm' : 0.5,
-                "p_entropy": 0.01,
-                "n_entropy": 0.01,
-                "neg": 0.25,
+                "alpha" : 0.02,
+                "beta" : 0.05,
+                'nu': 0.01,
+                'qt': 0.95,
+                'm' : 0.4,
+                "thresh": 0.5,
             },
 
 
@@ -468,7 +465,7 @@ class HHAR():
             'PPOT': {
                 'learning_rate': 5e-4,
                 'tau': 0.05,
-                "tau1": 0.8,
+                "tau1": 0.9,
                 "tau2": 1,
                 "alpha": 0.01,
                 "beta": 0.001,
