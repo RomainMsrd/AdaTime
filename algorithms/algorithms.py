@@ -1660,6 +1660,7 @@ class PPOT(Algorithm):
             #update alpha by moving average
             self.alpha = (1 - self.hparams['alpha']) * self.alpha + self.hparams['alpha'] * (conf >= self.hparams['tau1']).sum().item() / conf.size(0)
             self.alpha = max(self.alpha, 1e-3)
+            self.alpha = min(self.alpha, 1-1e-3)
             # get alpha / beta
             match = self.alpha / self.beta
             assert not np.isnan(match)
