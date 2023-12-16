@@ -79,6 +79,10 @@ class Trainer(AbstractTrainer):
                 scenario = f"{src_id}_to_{trg_id}"
                 table_results = self.append_results_to_tables(table_results, scenario, run_id, metrics)
                 table_risks = self.append_results_to_tables(table_risks, scenario, run_id, risks)
+                handlers = self.logger.handlers[:]
+                for handler in handlers:
+                    self.logger.removeHandler(handler)
+                    handler.close()
 
         # Calculate and append mean and std to tables
         table_results = self.add_mean_std_table(table_results, self.results_columns)
