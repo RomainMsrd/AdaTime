@@ -108,7 +108,8 @@ class EEG():
         super(EEG, self).__init__()
         self.train_params = {
             'num_epochs': 40,
-            'batch_size': 128*4,
+            'num_epochs_pr': 20,
+            'batch_size': 64,
             'weight_decay': 1e-4,
 
         }
@@ -210,15 +211,28 @@ class EEG():
             },
             'JPOT': {
                 'learning_rate': 5e-4,
-                "jdot_alpha": 0.0001,
-                "jdot_lambda": 0.05,
-                "alpha": 1e-4,
-                "beta": 1e-5,
-                'nu': 0.1,
-                'm': 0.01,
-                "p_entropy": 0.01,
-                "n_entropy": 0.01,
-                "neg": 0.25
+                "alpha" : 0.02,
+                "beta" : 0.05,
+                'nu': 0.01,
+                'qt': 0.95,
+                'm' : 0.4,
+                "thresh": 0.5,
+                "reg": 0.01,
+            },
+
+            'PPOT': {
+                'learning_rate': 5e-4,
+                'tau': 0.05,
+                "tau1": 0.9,
+                "tau2": 1,
+                "alpha": 0.01,
+                "beta": 0.001,
+                "reg": 0.1,
+                "ot": 5,
+                "p_entropy": 0.02,
+                "n_entropy": 2,
+                "neg": 0.25,
+                "thresh": 0.6,
             },
 
         }
@@ -228,9 +242,9 @@ class WISDM():
     def __init__(self):
         super().__init__()
         self.train_params = {
-            'num_epochs': 25,#70*2*3,
-            'num_epochs_pr':50,
-            'batch_size': 64*2,#32, #32,
+            'num_epochs': 20,#250,#70*2*3,
+            'num_epochs_pr':20,#100,
+            'batch_size': 32,#32, #32,
             'weight_decay': 1e-4,
 
         }
@@ -322,10 +336,10 @@ class WISDM():
             'MCD': {'learning_rate': 1e-2, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43},
             'SWD': {'learning_rate': 1e-3, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43, 'N': 128*10*3},
             'DeepJDOT': {
-                'learning_rate': 5e-3,
-                'src_cls_loss_wt': 1,
-                "jdot_alpha": 0.0001,
-                "jdot_lambda": 0.05,
+                'learning_rate': 5e-4,
+                'src_cls_loss_wt': 4.956979543799011,
+                "jdot_alpha": 0.11941004003214815,
+                "jdot_lambda": 0.26948221730976807,
                 "ot_method": "emd",
             },
             'DeepHOT': {
@@ -335,16 +349,16 @@ class WISDM():
                 "ot_method": "emd",
             },
             'PPOT': {
-                'learning_rate': 5e-4,
-                'tau': 0.05,
-                "tau1": 0.9,
+                'learning_rate': 5e-3,
+                'tau': 0.3,
+                "tau1": 0.7,
                 "tau2": 1,
-                "alpha": 0.001,
+                "alpha": 0.01,
                 "beta": 0.001,
                 "reg": 0.1,
                 "ot" : 5,
-                "p_entropy": 0.02,
-                "n_entropy": 2,
+                "p_entropy": 0.0569,
+                "n_entropy": 0.88,
                 "neg" : 0.25,
                 "thresh" : 0.5,
             },
@@ -356,6 +370,21 @@ class WISDM():
                 'qt': 0.95,
                 'm' : 0.4,
                 "thresh": 0.5,
+                "reg": 0.01,
+            },
+            'PPOT': {
+                'learning_rate': 5e-4,
+                'tau': 0.05,
+                "tau1": 0.9,
+                "tau2": 1,
+                "alpha": 0.01,
+                "beta": 0.001,
+                "reg": 0.1,
+                "ot": 5,
+                "p_entropy": 0.02,
+                "n_entropy": 2,
+                "neg": 0.25,
+                "thresh": 0.6,
             },
 
 

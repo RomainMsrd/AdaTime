@@ -1,5 +1,9 @@
 import copy
 import sys
+
+from matplotlib import pyplot as plt
+from sklearn.manifold import TSNE
+import matplotlib as mpl
 sys.path.append('../../ADATIME/')
 import torch
 import torch.nn.functional as F
@@ -54,6 +58,7 @@ class AbstractTrainer(object):
 
         # get dataset and base model configs
         self.dataset_configs, self.hparams_class = self.get_configs()
+        self.generate_private = args.generate_private
 
         # to fix dimension of features in classifier and discriminator networks.
         self.dataset_configs.final_out_channels = self.dataset_configs.tcn_final_out_channles if args.backbone == "TCN" else self.dataset_configs.final_out_channels
@@ -103,6 +108,18 @@ class AbstractTrainer(object):
         self.last_model, self.best_model = self.algorithm.update(self.src_train_dl, self.trg_train_dl, self.loss_avg_meters, self.logger)
         return self.last_model, self.best_model
 
+    def visualize(self):
+        # Get the algorithm and the backbone network
+        algorithm_class = get_algorithm_class(self.da_method)
+        backbone_fe = get_backbone_class(self.backbone)
+
+        # Initilaize the algorithm
+        self.algorithm = algorithm_class(backbone_fe, self.dataset_configs, self.hparams, self.device)
+        self.algorithm.to(self.device)
+        self.last_model, self.best_model = None
+        #TODO : To conitnue or delete
+        #load model
+
     def evaluate(self, test_loader, src=False):
         feature_extractor = self.algorithm.feature_extractor.to(self.device)
         classifier = self.algorithm.classifier.to(self.device)
@@ -149,6 +166,7 @@ class AbstractTrainer(object):
         trg_y = copy.deepcopy(trg_loader.dataset.y_data)
         src_y = src_loader.dataset.y_data
         pri_c = torch.Tensor(np.setdiff1d(trg_y, src_y))
+        print("Private : ", pri_c)
         return pri_c
 
     def H_score(self, trg_pred, trg_y):
@@ -173,6 +191,29 @@ class AbstractTrainer(object):
         hparams_class = get_hparams_class(self.dataset)
         return dataset_class(), hparams_class()
 
+    def latent_space_tsne(self, home_path, log_dir, scenario):
+        src_feats, src_labels = self.algorithm.get_latent_features(self.src_test_dl)
+        trg_feats, trg_labels = self.algorithm.get_latent_features(self.trg_test_dl)
+        tsne = TSNE()
+        src_tsne = tsne.fit_transform(src_feats)
+        trg_tsne = tsne.fit_transform(trg_feats)
+        plt.close()
+        plt.figure(figsize=(10, 6))
+        colors = np.array(['green', 'blue', 'red', 'orange', 'purple', 'grey'])
+        color_map = mpl.colors.ListedColormap(colors)
+        for gt in np.unique(src_labels):
+            m = src_labels == gt
+            plt.scatter(src_tsne[m, 0], src_tsne[m, 1], c=colors[src_labels[m]], s=30, label=f'src {gt}', marker='+')
+        for gt in np.unique(trg_labels):
+            m = trg_labels == gt
+            plt.scatter(trg_tsne[m, 0], trg_tsne[m, 1], c=colors[trg_labels[m]], s=30, label=f'trg {gt}', marker="d", alpha=0.5)
+        plt.title(f"{self.algorithm.__class__.__name__} {scenario} TSNE.png")
+        plt.legend()
+        save_dir = os.path.join(home_path, log_dir)
+        os.makedirs(save_dir, exist_ok=True)
+        plt.savefig(save_dir + "TSNE")
+        print('Figure saved at ' + save_dir + "TSNE.png")
+
     def init_metrics(self):
         self.num_classes = self.dataset_configs.num_classes
         self.ACC = Accuracy(task="multiclass", num_classes=self.num_classes)
@@ -180,13 +221,18 @@ class AbstractTrainer(object):
         self.F1 = F1Score(task="multiclass", num_classes=self.num_classes, average="macro")
         self.AUROC = AUROC(task="multiclass", num_classes=self.num_classes)
 
-    def load_data(self, src_id, trg_id):
-        encoder = get_label_encoder(self.data_path, src_id, self.dataset_configs, self.hparams, "train") if self.uniDA else None
-        self.src_train_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, encoder, "train", self.dataset_configs.src_balanced)
-        self.src_test_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, encoder,"test")
+    def load_data(self, src_id, trg_id, sc_id):
+        priv_cl = {"scr": [], "trg":[]}
+        encoder = None
+        if self.generate_private:
+            priv_cl = self.dataset_configs.private_classes[sc_id]
+        if self.uniDA:
+            encoder = get_label_encoder(self.data_path, src_id, self.dataset_configs, priv_cl['src'],"train")
+        self.src_train_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, encoder, priv_cl['src'], "train")
+        self.src_test_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, encoder,priv_cl['src'], "test")
 
-        self.trg_train_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, encoder, "train")
-        self.trg_test_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, encoder, "test")
+        self.trg_train_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, encoder, priv_cl['trg'], "train")
+        self.trg_test_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, encoder, priv_cl['trg'], "test")
 
         self.few_shot_dl_5 = few_shot_data_generator(self.trg_test_dl, self.dataset_configs, encoder,
                                                      5)  # set 5 to other value if you want other k-shot FST
@@ -198,8 +244,6 @@ class AbstractTrainer(object):
     def create_save_dir(self, save_dir):
         if not os.path.exists(save_dir):
             os.mkdir(save_dir)
-
-
 
     def save_tables_to_file(self,table_results, name):
         # save to file if needed

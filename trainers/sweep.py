@@ -86,7 +86,7 @@ class Trainer(AbstractTrainer):
 
         #self.logger = create_logger(self.exp_log_dir)
 
-        for src_id, trg_id in self.dataset_configs.scenarios:
+        for sc_id, (src_id, trg_id) in enumerate(self.dataset_configs.scenarios):
             for run_id in range(self.num_runs):
                 # set random seed and create logger
                 fix_randomness(run_id)
@@ -97,7 +97,7 @@ class Trainer(AbstractTrainer):
                 self.loss_avg_meters = collections.defaultdict(lambda: AverageMeter())
 
                 # load data and train model
-                self.load_data(src_id, trg_id)
+                self.load_data(src_id, trg_id, sc_id)
 
                 # initiate the domain adaptation algorithm
                 self.initialize_algorithm()

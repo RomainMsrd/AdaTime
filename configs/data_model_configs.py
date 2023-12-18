@@ -8,6 +8,8 @@ class HAR():
     def __init__(self):
         super(HAR, self)
         self.scenarios = [("2", "11"), ("6", "23"), ("7", "13"), ("9", "18"), ("12", "16"), ("18", "27"), ("20", "5"), ("24", "8"), ("28", "27"), ("30", "20")]
+        self.private_classes = [{'src': [3, 0]}, {'src': [2]}, {'src': [5, 1]}, {'src': [0]}, {'src': [0, 1]},
+                                {'src': [0, 2]}, {'src': [1]}, {'src': [1]}, {'src': [0, 0]}, {'src': [1, 5]}]
         self.class_names = ['walk', 'upstairs', 'downstairs', 'sit', 'stand', 'lie']
         self.sequence_len = 128
         self.shuffle = True
@@ -55,6 +57,7 @@ class EEG():
         self.shuffle = True
         self.drop_last = True
         self.normalize = True
+        self.src_balanced = True
 
         # model configs
         self.input_channels = 1
@@ -97,9 +100,6 @@ class WISDM(object):
         #self.scenarios = [("29", "20"), ("0", "34")]
         self.scenarios = [('29', '7'), ('14', '3'), ('1', '2'), ('25', '9'), ('25', '7'), ('22', '11'), ('22', '32'),
                          ('25', '4'), ('14', '32'), ('1', '12')]
-        #self.scenarios = [('14', '3')]
-
-        #self.scenarios = [("35", "31")]
         self.num_classes = 6
         self.shuffle = True
         self.drop_last = False
@@ -141,7 +141,13 @@ class HHAR(object):  ## HHAR dataset, SAMSUNG device.
         self.sequence_len = 128
         self.scenarios = [("0", "6"), ("1", "6"), ("2", "7"), ("3", "8"), ("4", "5"),
                           ("5", "0"), ("6", "1"), ("7", "4"), ("8", "3"), ("0", "2")]
-        self.scenarios = [("0", "6")]
+        #self.scenarios = [("1", "6")]
+
+        self.private_classes = [{'src': [3], 'trg': []}, {'src': [0, 5], 'trg': []}, {'src': [2], 'trg': []}, {'src': [0], 'trg': []}, {'src': [3], 'trg': []},
+                                {'src': [1], 'trg': []}, {'src': [5], 'trg': []}, {'src': [2], 'trg': []}, {'src': [5], 'trg': []}, {'src': [1, 0], 'trg': []}]
+        #self.private_classes = [{'src': [0, 5], 'trg': []}]
+        self.generate_private = None #Is initialized in Trainer given main arguments
+        #self.scenarios = [("0", "6")]
         self.class_names = ['bike', 'sit', 'stand', 'walk', 'stairs_up', 'stairs_down']
         self.num_classes = 6
         self.shuffle = True

@@ -48,7 +48,7 @@ class Trainer(AbstractTrainer):
 
 
         # Trainer
-        for src_id, trg_id in self.dataset_configs.scenarios:
+        for sc_id, (src_id, trg_id) in enumerate(self.dataset_configs.scenarios):
             for run_id in range(self.num_runs):
                 # fixing random seed
                 fix_randomness(run_id)
@@ -60,7 +60,7 @@ class Trainer(AbstractTrainer):
                 self.loss_avg_meters = collections.defaultdict(lambda: AverageMeter())
 
                 # Load data
-                self.load_data(src_id, trg_id)
+                self.load_data(src_id, trg_id, sc_id)
                 
                 # initiate the domain adaptation algorithm
                 self.initialize_algorithm()
@@ -70,6 +70,11 @@ class Trainer(AbstractTrainer):
 
                 # Save checkpoint
                 self.save_checkpoint(self.home_path, self.scenario_log_dir, self.last_model, self.best_model)
+                #self.algorithm.network = self.best_model
+
+                #visualize latent space
+                sc = f"{src_id} --> {trg_id}"
+                self.latent_space_tsne(self.home_path, self.scenario_log_dir, sc)
 
                 # Calculate risks and metrics
                 metrics = self.calculate_metrics()
@@ -99,7 +104,7 @@ class Trainer(AbstractTrainer):
         best_results = pd.DataFrame(columns=self.results_columns)
 
         # Cross-domain scenarios
-        for src_id, trg_id in self.dataset_configs.scenarios:
+        for sc_id, (src_id, trg_id) in enumerate(self.dataset_configs.scenarios):
             for run_id in range(self.num_runs):
                 # fixing random seed
                 fix_randomness(run_id)
@@ -110,7 +115,7 @@ class Trainer(AbstractTrainer):
                 self.loss_avg_meters = collections.defaultdict(lambda: AverageMeter())
 
                 # Load data
-                self.load_data(src_id, trg_id)
+                self.load_data(src_id, trg_id, sc_id)
 
                 # Build model
                 self.initialize_algorithm()

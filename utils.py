@@ -1,5 +1,7 @@
 import torch
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
+from sklearn.manifold import TSNE
 from torch import nn as nn
 
 import random
@@ -273,8 +275,6 @@ def calculate_risk(target_model, risk_dataloader, device):
     cls_loss = F.cross_entropy(pred, y_data.long().to(device))
     return cls_loss.item()
 
-
-
 class DictAsObject:
     def __init__(self, d):
         self.__dict__ = d
@@ -304,5 +304,4 @@ class EMA:
                 if name in self.params and param.requires_grad:
                     self.shadow[name] -= (1 - self.decay) * (self.shadow[name] - param.data)
                     param.data = self.shadow[name]
-
 

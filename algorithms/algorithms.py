@@ -72,6 +72,21 @@ class Algorithm(torch.nn.Module):
 
         return last_model, best_model
 
+    def get_latent_features(self, dataloader):
+        feature_set = []
+        label_set = []
+        self.feature_extractor.eval()
+        with torch.no_grad():
+            for _, (data, label) in enumerate(dataloader):
+                data = data.to(self.device)
+                feature = self.feature_extractor(data)
+                feature_set.append(feature.cpu())
+                label_set.append(label.cpu())
+            feature_set = torch.cat(feature_set, dim=0)
+            feature_set = F.normalize(feature_set, p=2, dim=-1)
+            label_set = torch.cat(label_set, dim=0)
+        return feature_set, label_set
+
     def correct_predictions(self, preds):
         return preds
 

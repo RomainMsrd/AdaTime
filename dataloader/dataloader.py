@@ -26,7 +26,7 @@ class Load_Dataset(Dataset):
         if not encoder is None:
             self.encoder = encoder.copy()
             #diff = len(np.unique(y_data)) - len(encoder)
-            diff = len(self.encoder) - (max(y_data)+1)# - len(encoder)
+            diff = abs((max(y_data)+1) - len(self.encoder))# - len(encoder)
             if diff > 0:
                 print("Private Target Classes Detected")
                 self.encoder = np.concatenate([self.encoder, np.zeros(diff, dtype=int) - 1])
@@ -35,7 +35,10 @@ class Load_Dataset(Dataset):
                 self.encoder[gt] = max(self.encoder) + 1 if self.encoder[gt] == -1 else self.encoder[gt]
             #Encode Labels
             y_data = self.encoder[y_data]
+            """self.decoder = self.encoder.copy()
+            self.decoder = {v: k for i, v in enumerate(self.encoder)}"""
 
+        print(np.unique(y_data))
         if y_data is not None and isinstance(y_data, np.ndarray):
             y_data = torch.from_numpy(y_data)
         
@@ -74,9 +77,12 @@ class Load_Dataset(Dataset):
         return self.len
 
 
-def get_label_encoder(data_path, domain_id, dataset_configs, hparams, dtype):
+def get_label_encoder(data_path, domain_id, dataset_configs, pri_cl, dtype):
     # loading dataset file from path
     dataset_file = torch.load(os.path.join(data_path, f"{dtype}_{domain_id}.pt"))
+
+    if len(pri_cl) != 0:
+        dataset_file = remove_private_class(dataset_file, pri_cl)
 
     uni = np.unique(dataset_file["labels"])
     print("Uni : ", uni)
@@ -87,14 +93,23 @@ def get_label_encoder(data_path, domain_id, dataset_configs, hparams, dtype):
     for i, k in enumerate(uni):
         encoder[k] = i
 
-    '''encoder = {}
-    for i, k in enumerate(uni):
-        encoder[k] = i'''
     return encoder
 
-def data_generator(data_path, domain_id, dataset_configs, hparams, encoder, dtype, balanced_src=False):
+
+def remove_private_class(dataset_file, private_class):
+    mask = np.isin(dataset_file['labels'], private_class, invert=True)
+    dataset_file['labels'] = dataset_file['labels'][mask]
+    dataset_file['samples'] = dataset_file['samples'][mask]
+    assert len(mask) != len(dataset_file['labels'])
+    return dataset_file
+
+
+def data_generator(data_path, domain_id, dataset_configs, hparams, encoder, pri_cl, dtype):
     # loading dataset file from path
     dataset_file = torch.load(os.path.join(data_path, f"{dtype}_{domain_id}.pt"))
+
+    if len(pri_cl) != 0:
+        dataset_file = remove_private_class(dataset_file, pri_cl)
 
     # Loading datasets
     dataset = Load_Dataset(dataset_file, dataset_configs, encoder)
@@ -107,7 +122,7 @@ def data_generator(data_path, domain_id, dataset_configs, hparams, encoder, dtyp
         drop_last = dataset_configs.drop_last
 
     # Dataloaders
-    if balanced_src:
+    if dataset_configs.src_balanced:
         print("Source Mini-Batch is Balanced during training !")
         class_sample_count = np.array(
             [len(np.where(dataset.y_data == t)[0]) for t in np.unique(dataset.y_data)])
@@ -128,7 +143,6 @@ def data_generator(data_path, domain_id, dataset_configs, hparams, encoder, dtyp
                                               drop_last=drop_last,
                                               num_workers=0)
     return data_loader
-
 
 
 def data_generator_old(data_path, domain_id, dataset_configs, hparams):
@@ -168,7 +182,8 @@ def few_shot_data_generator(data_loader, dataset_configs, encoder, num_samples=5
     selected_y = torch.cat([y_data[samples_ids[i][selected_ids[i]]] for i in range(NUM_CLASSES)], dim=0)
 
     few_shot_dataset = {"samples": selected_x, "labels": selected_y}
-    encoder = np.arange(len(encoder))
+    if not encoder is None:
+        encoder = np.arange(len(encoder))
     few_shot_dataset = Load_Dataset(few_shot_dataset, dataset_configs, encoder)
 
     few_shot_loader = torch.utils.data.DataLoader(dataset=few_shot_dataset, batch_size=len(few_shot_dataset),
