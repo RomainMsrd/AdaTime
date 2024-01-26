@@ -14,13 +14,14 @@ class Load_Dataset(Dataset):
     def __init__(self, dataset, dataset_configs, encoder):
         super().__init__()
         self.num_channels = dataset_configs.input_channels
+        self.return_index = dataset_configs.da_method == "DANCE"
 
         # Load samples
         x_data = dataset["samples"]
 
         # Load labels
         y_data = np.array(dataset["labels"]).copy()
-
+        #print(len(y_data))
 
         #Extend Encoder if necessary (new classes)
         if not encoder is None:
@@ -71,6 +72,8 @@ class Load_Dataset(Dataset):
         if self.transform:
             x = self.transform(self.x_data[index].reshape(self.num_channels, -1, 1)).reshape(self.x_data[index].shape)
         y = self.y_data[index] if self.y_data is not None else None
+        if self.return_index:
+            return x, y, index
         return x, y
 
     def __len__(self):
@@ -80,6 +83,7 @@ class Load_Dataset(Dataset):
 def get_label_encoder(data_path, domain_id, dataset_configs, pri_cl, dtype):
     # loading dataset file from path
     dataset_file = torch.load(os.path.join(data_path, f"{dtype}_{domain_id}.pt"))
+    print(dataset_file['labels'].shape, dataset_file['samples'].shape)
 
     if len(pri_cl) != 0:
         dataset_file = remove_private_class(dataset_file, pri_cl)

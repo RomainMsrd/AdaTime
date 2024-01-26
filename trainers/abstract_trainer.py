@@ -120,7 +120,7 @@ class AbstractTrainer(object):
         #TODO : To conitnue or delete
         #load model
 
-    def evaluate(self, test_loader, src=False):
+    def evaluate_old(self, test_loader, src=False):
         feature_extractor = self.algorithm.feature_extractor.to(self.device)
         classifier = self.algorithm.classifier.to(self.device)
 
@@ -162,6 +162,8 @@ class AbstractTrainer(object):
         self.full_preds = torch.cat((preds_list))
         self.full_labels = torch.cat((labels_list))
 
+    def evaluate(self, test_loader, src=False):
+        self.loss, self.full_preds, self.full_labels = self.algorithm.evaluate(test_loader, self.trg_private_class)
     def get_trg_private(self, src_loader, trg_loader):
         trg_y = copy.deepcopy(trg_loader.dataset.y_data)
         src_y = src_loader.dataset.y_data
@@ -169,7 +171,8 @@ class AbstractTrainer(object):
         print("Private : ", pri_c)
         return pri_c
 
-    def H_score(self, trg_pred, trg_y):
+    def H_score_corr(self, trg_pred, trg_y):
+        trg_pred = self.algorithm.decision_function(trg_pred)
         class_c = np.where(trg_y != -1)
         class_p = np.where(trg_y == -1)
 
@@ -185,6 +188,26 @@ class AbstractTrainer(object):
         else:
             H = 2 * acc_c * acc_p / (acc_p + acc_c)
         return H, acc_c, acc_p
+    def H_score(self, trg_pred, trg_y):
+        class_c = np.where(trg_y != -1)
+        class_p = np.where(trg_y == -1)
+        print(np.array(class_p).shape)
+
+        label_c, pred_c = trg_y[class_c], trg_pred[class_c]
+        label_p, pred_p = trg_y[class_p], trg_pred[class_p]
+        acc_c = self.ACC(pred_c.argmax(dim=1), label_c)
+
+        pred_p = self.algorithm.decision_function(pred_p)
+        acc_p = (pred_p == label_p).sum()/(len(pred_p)) if len(pred_p) != 0 else torch.Tensor([0])
+        #acc_p = self.ACC(pred_p, label_p)
+
+        acc_mix = (trg_y != -1).sum()/len(trg_y) * acc_c + (trg_y == -1).sum()/len(trg_y) * acc_p
+        print("Trg Private Acc : ", acc_p.item())
+        if acc_c == 0 or acc_p == 0:
+            H = torch.Tensor([0])
+        else:
+            H = 2 * acc_c * acc_p / (acc_p + acc_c)
+        return H, acc_c, acc_p, acc_mix
 
     def get_configs(self):
         dataset_class = get_dataset_class(self.dataset)
@@ -215,27 +238,35 @@ class AbstractTrainer(object):
         print('Figure saved at ' + save_dir + "TSNE.png")
 
     def init_metrics(self):
-        self.num_classes = self.dataset_configs.num_classes
+        self.num_classes = self.dataset_configs.num_classes+1
         self.ACC = Accuracy(task="multiclass", num_classes=self.num_classes)
         self.BinACC = Accuracy(task="binary")
         self.F1 = F1Score(task="multiclass", num_classes=self.num_classes, average="macro")
         self.AUROC = AUROC(task="multiclass", num_classes=self.num_classes)
 
     def load_data(self, src_id, trg_id, sc_id):
-        priv_cl = {"scr": [], "trg":[]}
+        priv_cl = {"src": [], "trg":[]}
         encoder = None
+        self.dataset_configs.da_method = self.da_method
         if self.generate_private:
             priv_cl = self.dataset_configs.private_classes[sc_id]
         if self.uniDA:
             encoder = get_label_encoder(self.data_path, src_id, self.dataset_configs, priv_cl['src'],"train")
+        #print("Source Dataset")
         self.src_train_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, encoder, priv_cl['src'], "train")
         self.src_test_dl = data_generator(self.data_path, src_id, self.dataset_configs, self.hparams, encoder,priv_cl['src'], "test")
 
+        #print("Target Dataset")
         self.trg_train_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, encoder, priv_cl['trg'], "train")
         self.trg_test_dl = data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams, encoder, priv_cl['trg'], "test")
 
+        #print("Few Shot Dataset")
         self.few_shot_dl_5 = few_shot_data_generator(self.trg_test_dl, self.dataset_configs, encoder,
                                                      5)  # set 5 to other value if you want other k-shot FST
+
+        if self.da_method == "OPDA_BP":
+            self.dataset_configs.num_classes += 1
+
         self.init_metrics()
         if self.uniDA:
             self.trg_private_class = self.get_trg_private(self.src_train_dl, self.trg_train_dl)
@@ -332,16 +363,17 @@ class AbstractTrainer(object):
             # f1
             f1 = self.F1(self.full_preds[mask].argmax(dim=1).cpu(), self.full_labels[mask].cpu()).item()
             # auroc
-            auroc = self.AUROC(self.full_preds[mask].cpu(), self.full_labels[mask].cpu()).item()
+            auroc = 0# self.AUROC(self.full_preds[mask].cpu(), self.full_labels[mask].cpu()).item()
 
             self.full_labels[~mask] = -1
-            H_score, acc_c, acc_p = self.H_score(self.full_preds.cpu(), self.full_labels.cpu())
-            H_score, acc_c, acc_p = H_score.item(), acc_c.item(), acc_p.item()
+            H_score, acc_c, acc_p, acc_mix = self.H_score(self.full_preds.cpu(), self.full_labels.cpu())
+            H_score, acc_c, acc_p, acc_mix = H_score.item(), acc_c.item(), acc_p.item(), acc_mix.item()
             print("H_score : ", H_score)
             print("Acc_C : ", acc_c)
             print("Acc_P : ", acc_p)
+            print("Acc_Mix : ", acc_mix)
 
-            return acc, f1, auroc, H_score, acc_c, acc_p
+            return acc, f1, auroc, H_score, acc_c, acc_p, acc_mix
 
         # accuracy  
         acc = self.ACC(self.full_preds.argmax(dim=1).cpu(), self.full_labels.cpu()).item()
@@ -381,12 +413,17 @@ class AbstractTrainer(object):
 
     def add_mean_std_table(self, table, columns):
         # Calculate average and standard deviation for metrics
-        avg_metrics = [table[metric].mean() for metric in columns[2:]]
-        std_metrics = [table[metric].std() for metric in columns[2:]]
+        columns = table.columns
+        #avg_metrics = [table[metric].mean() for metric in columns[2:]]
+        #std_metrics = [table[metric].std() for metric in columns[2:]]
+        avg_metrics = [table[metric].mean() for metric in columns[1:]]
+        std_metrics = [table[metric].std() for metric in columns[1:]]
 
         # Create dataframes for mean and std values
-        mean_metrics_df = pd.DataFrame([['mean', '-', *avg_metrics]], columns=columns)
-        std_metrics_df = pd.DataFrame([['std', '-', *std_metrics]], columns=columns)
+        #mean_metrics_df = pd.DataFrame([['mean', '-', *avg_metrics]], columns=columns)
+        #std_metrics_df = pd.DataFrame([['std', '-', *std_metrics]], columns=columns)
+        mean_metrics_df = pd.DataFrame([['mean', *avg_metrics]], columns=columns)
+        std_metrics_df = pd.DataFrame([['std', *std_metrics]], columns=columns)
 
         # Concatenate original dataframes with mean and std dataframes
         table = pd.concat([table, mean_metrics_df, std_metrics_df], ignore_index=True)

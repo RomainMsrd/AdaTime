@@ -46,5 +46,5 @@ if __name__ == "__main__":
 
     trainer = Trainer(args)
 
-    #trainer.sweep(sweep_id="oddteam/AdaTime_OT/3q9qopbr")
+    #trainer.sweep(sweep_id="oddteam/AdaTime_OT/vzca1rrs")
     trainer.sweep()

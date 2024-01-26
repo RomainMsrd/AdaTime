@@ -395,7 +395,7 @@ class HHAR():
     def __init__(self):
         super().__init__()
         self.train_params = {
-            'num_epochs': 40,
+            'num_epochs': 10,#160, #50,#160, #250,
             'num_epochs_pr': 50,
             'batch_size': 32,
             'weight_decay': 1e-4,
@@ -485,29 +485,136 @@ class HHAR():
             'MCD': {'learning_rate': 1e-2, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43},
             'SWD': {'learning_rate': 1e-3, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43, 'N': 128 * 10 * 3},
             'DeepJDOT': {
-                'learning_rate': 5e-3,
-                'src_cls_loss_wt': 1,
-                "jdot_alpha": 0.0001,
-                "jdot_lambda": 0.05,
+                'learning_rate': 0.0005,
+                'src_cls_loss_wt': 4.880838207893526,
+                "jdot_alpha": 0.5621065365082184,
+                "jdot_lambda": 0.1872726371146924,
                 "ot_method": "emd",
             },
-            'PPOT': {
+            'JPOT': {
                 'learning_rate': 5e-4,
-                'tau': 0.05,
-                "tau1": 0.9,
+                "alpha": 0.02,
+                "beta": 0.05,
+                'nu': 0.01,
+                'qt': 0.95,
+                'm': 0.4,
+                "thresh": 0.5,
+                "reg": 0.01,
+            },
+            'PPOT': {
+                'learning_rate': 0.0005,
+                'tau': 0.1,
+                "tau1": 0.7,
                 "tau2": 1,
-                "alpha": 0.01,
+                "alpha": 0.001,
                 "beta": 0.001,
                 "reg": 0.1,
-                "ot": 5,
-                "p_entropy": 0.02,
-                "n_entropy": 2,
-                "neg": 0.25,
-                "thresh": 0.6,
+                "ot": 0.0428,
+                "p_entropy": 0.6149,
+                "n_entropy": 0.263,
+                "neg": 0.35,
+                "thresh": 0.61
             },
+            'DeepCOT2': {
+                'learning_rate': 0.0005,
+                'src_cls_loss_wt': 4.880838207893526,
+                "jdot_alpha": 0.5621065365082184,
+                "jdot_lambda": 0.1872726371146924,
+                "ot_method": "emd",
+            },
+            'UDA': {
+                'learning_rate': 0.0005,
+                "src_cls_loss_wt": 0.386167577207679,
+                "domain_loss_wt": 0.16,
+                'w0': 0.1,
+            },
+            'OPDA_BP': {
+                'learning_rate': 0.05,
+                't': 0.5,
+            },
+            'OVANet': {
+                'learning_rate': 0.05,
+            }
 
         }
 
+class ToyDataset():
+    def __init__(self):
+        super().__init__()
+        self.train_params = {
+            'num_epochs': 4,#50, #50,#160, #50,#160, #250,
+            'num_epochs_pr': 20,
+            'batch_size': 64*2,
+            'weight_decay': 1e-4,
+        }
+        self.alg_hparams = {
+            'NO_ADAPT': {'learning_rate': 1e-3, 'src_cls_loss_wt': 1},
+            'TARGET_ONLY': {'learning_rate': 1e-3, 'trg_cls_loss_wt': 1},
+
+            'MCD': {'learning_rate': 1e-2, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43},
+            'SWD': {'learning_rate': 1e-3, 'src_cls_loss_wt': 9.74, 'domain_loss_wt': 5.43, 'N': 128 * 10 * 3},
+            'DeepJDOT': {
+                'learning_rate': 0.0005,
+                'src_cls_loss_wt': 4.880838207893526,
+                "jdot_alpha": 0.5621065365082184,
+                "jdot_lambda": 0.1872726371146924,
+                "ot_method": "emd",
+            },
+            'JPOT': {
+                'learning_rate': 5e-4,
+                "alpha": 0.02,
+                "beta": 0.05,
+                'nu': 0.01,
+                'qt': 0.95,
+                'm': 0.4,
+                "thresh": 0.5,
+                "reg": 0.01,
+            },
+            'PPOT': {
+                'learning_rate': 0.0005,
+                'tau': 0.1,
+                "tau1": 0.7,
+                "tau2": 1,
+                "alpha": 0.001,
+                "beta": 0.001,
+                "reg": 0.01,
+                "ot": 0.428,
+                "p_entropy": 0.6149,
+                "n_entropy": 0.263,
+                "neg": 0.35,
+                "thresh": 0.7
+            },
+            'DeepCOT2': {
+                'learning_rate': 0.0005,
+                'src_cls_loss_wt': 4.880838207893526,
+                "jdot_alpha": 0.5621065365082184,
+                "jdot_lambda": 0.1872726371146924,
+                "ot_method": "emd",
+            },
+            'UDA': {
+                'learning_rate': 0.0005,
+                "src_cls_loss_wt": 0.386167577207679,
+                "domain_loss_wt": 0.16,
+                'w0': 0.2,
+            },
+            'OPDA_BP': {
+                'learning_rate': 0.005,
+                't': 0.5,
+            },
+            'OVANet': {
+                'learning_rate' : 0.05,
+            },
+            'DANCE': {
+                'learning_rate': 0.05,
+                'eta' : 0.05,
+                'margin' : 0.2,
+            },
+            'OpenJDOT': {
+                'learning_rate': 0.005,
+                't': 0.7,
+                'jdot_alpha':1,
+            }
+        }
 
 class FD():
     def __init__(self):

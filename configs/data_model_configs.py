@@ -141,7 +141,7 @@ class HHAR(object):  ## HHAR dataset, SAMSUNG device.
         self.sequence_len = 128
         self.scenarios = [("0", "6"), ("1", "6"), ("2", "7"), ("3", "8"), ("4", "5"),
                           ("5", "0"), ("6", "1"), ("7", "4"), ("8", "3"), ("0", "2")]
-        #self.scenarios = [("1", "6")]
+        #self.scenarios = [("2", "7")]
 
         self.private_classes = [{'src': [3], 'trg': []}, {'src': [0, 5], 'trg': []}, {'src': [2], 'trg': []}, {'src': [0], 'trg': []}, {'src': [3], 'trg': []},
                                 {'src': [1], 'trg': []}, {'src': [5], 'trg': []}, {'src': [2], 'trg': []}, {'src': [5], 'trg': []}, {'src': [1, 0], 'trg': []}]
@@ -181,7 +181,52 @@ class HHAR(object):  ## HHAR dataset, SAMSUNG device.
         self.DSKN_disc_hid = 128
         self.hidden_dim = 500
 
-        
+class ToyDataset(object):  ## HHAR dataset, SAMSUNG device.
+    def __init__(self):
+        super(ToyDataset, self).__init__()
+        self.src_balanced = False
+        self.sequence_len = 100
+        self.scenarios = [("0", "1"), ("1", "0"), ("2", "3"), ("3", "2")]
+        #self.scenarios = [("0", "1"), ("1", "0")]
+        #self.scenarios = [("2", "7")]
+
+        self.private_classes = [{'src': [2], 'trg': []}, {'src': [2], 'trg': []}, {'src': [3], 'trg': []}, {'src': [3], 'trg': []}]
+        #self.private_classes = [{'src': [0, 5], 'trg': []}]
+        self.generate_private = None #Is initialized in Trainer given main arguments
+        self.da_method = None #Is initialized in Trainer given main arguments
+        #self.scenarios = [("0", "6")]
+        self.class_names = ['bike', 'sit', 'stand', 'walk', 'stairs_up', 'stairs_down']
+        self.num_classes = 4
+        self.shuffle = True
+        self.drop_last = True
+        self.normalize = True
+
+        # model configs
+        self.input_channels = 1
+        self.kernel_size = 5
+        self.stride = 1
+        self.dropout = 0.5
+
+        # features
+        self.mid_channels = 8
+        self.final_out_channels = 16
+        self.features_len = 1
+
+        # TCN features
+        self.tcn_layers = [75,150]
+        self.tcn_final_out_channles = self.tcn_layers[-1]
+        self.tcn_kernel_size = 17
+        self.tcn_dropout = 0.0
+
+        # lstm features
+        self.lstm_hid = 128
+        self.lstm_n_layers = 1
+        self.lstm_bid = False
+
+        # discriminator
+        self.disc_hid_dim = 16
+        self.DSKN_disc_hid = 16
+        self.hidden_dim = 16
         
 class FD(object):
     def __init__(self):

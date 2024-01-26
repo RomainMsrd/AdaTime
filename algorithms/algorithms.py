@@ -7,11 +7,12 @@ import numpy as np
 import itertools
 
 from sklearn.cluster import SpectralClustering
+from torch.nn import BCELoss, BCEWithLogitsLoss
 
 from models.models import classifier, ReverseLayerF, Discriminator, RandomLayer, Discriminator_CDAN, \
-    codats_classifier, AdvSKM_Disc, CNN_ATTN
+    codats_classifier, AdvSKM_Disc, CNN_ATTN, DiscriminatorUDA, classifierOVANet, classifierNoBias, LinearAverage
 from models.loss import MMD_loss, CORAL, ConditionalEntropyLoss, VAT, LMMD_loss, HoMM_loss, NTXentLoss, SupConLoss, \
-    SliceWassersteinDiscrepancy
+    SliceWassersteinDiscrepancy, EntropyLoss, Entropy, MyBCE
 from utils import EMA
 from torch.optim.lr_scheduler import StepLR
 from copy import deepcopy
@@ -44,6 +45,12 @@ class Algorithm(torch.nn.Module):
         self.classifier = classifier(configs)
         self.network = nn.Sequential(self.feature_extractor, self.classifier)
         self.is_uniDA = False
+        self.uniDA = True
+
+        self.optimizer = torch.optim.Adam(
+            list(self.network.parameters()),
+            lr=0.005,
+        )
 
 
     # update function is common to all algorithms
@@ -71,15 +78,37 @@ class Algorithm(torch.nn.Module):
         last_model = self.network.state_dict()
 
         return last_model, best_model
+    def pretrain_epoch(self, src_loader, avg_meter):
 
+        for src_x, src_y in src_loader:
+            src_x, src_y = src_x.to(self.device), src_y.to(self.device)
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            src_cls_loss = self.cross_entropy(src_pred, src_y)
+
+            loss = src_cls_loss
+
+            self.optimizer.zero_grad()
+
+            loss.backward()
+
+            self.optimizer.step()
+
+            losses = {'Pr_Src_cls_loss': loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
     def get_latent_features(self, dataloader):
         feature_set = []
         label_set = []
         self.feature_extractor.eval()
+        self.classifier.eval()
         with torch.no_grad():
             for _, (data, label) in enumerate(dataloader):
                 data = data.to(self.device)
-                feature = self.feature_extractor(data)
+                feature = self.classifier(self.feature_extractor(data))
                 feature_set.append(feature.cpu())
                 label_set.append(label.cpu())
             feature_set = torch.cat(feature_set, dim=0)
@@ -87,11 +116,53 @@ class Algorithm(torch.nn.Module):
             label_set = torch.cat(label_set, dim=0)
         return feature_set, label_set
 
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        feature_extractor = self.feature_extractor.to(self.device)
+        classifier = self.classifier.to(self.device)
+
+        feature_extractor.eval()
+        classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = feature_extractor(data)
+                predictions = classifier(features)
+
+                # compute loss
+                if self.uniDA:
+                    if src and self.is_uniDA:
+                        corr_preds = self.correct_predictions(predictions)
+                        loss = F.cross_entropy(corr_preds, labels)
+                        #loss = F.cross_entropy(predictions[m], labels[m])
+                    else:
+                        #m = torch.isin(labels, self.trg_private_class.view((-1)).long().to(self.device), invert=True)
+                        m = torch.isin(labels.cpu(), trg_private_class, invert=True)
+                        loss = F.cross_entropy(predictions[m], labels[m])
+                else:
+                    loss = F.cross_entropy(predictions, labels)
+                total_loss.append(loss.detach().cpu().item())
+                #predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
     def correct_predictions(self, preds):
         return preds
 
     def decision_function(self, preds):
-        return preds
+        confidence, pred = preds.max(dim=1)
+        return pred
     # train loop vary from one method to another
     def training_epoch(self, *args, **kwargs):
         raise NotImplementedError
@@ -110,7 +181,7 @@ class NO_ADAPT(Algorithm):
             lr=hparams["learning_rate"],
             weight_decay=hparams["weight_decay"]
         )
-        self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        #self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
         # hparams
         self.hparams = hparams
         # device
@@ -136,7 +207,7 @@ class NO_ADAPT(Algorithm):
             for key, val in losses.items():
                 avg_meter[key].update(val, 32)
 
-        self.lr_scheduler.step()
+        #self.lr_scheduler.step()
 
 
 class TARGET_ONLY(Algorithm):
@@ -1115,7 +1186,916 @@ class CoTMix(Algorithm):
 
         return src_dominant, trg_dominant
 
+class UDA(Algorithm):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(configs, backbone)
 
+
+        # optimizer and scheduler
+
+        #self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        # hparams
+        self.hparams = hparams
+        # device
+        self.device = device
+
+        # Domain Discriminator
+        self.domain_classifier = DiscriminatorUDA(configs)
+        self.adv_discriminator = DiscriminatorUDA(configs)
+
+        self.conditional_entropy = ConditionalEntropyLoss()
+        self.optimizer = torch.optim.Adam(
+            list(self.network.parameters()) + list(self.adv_discriminator.parameters()),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.optimizer_disc = torch.optim.Adam(
+            self.domain_classifier.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.w_0 = hparams["w0"]
+
+        #self.bce = BCEWithLogitsLoss()
+        self.bce = BCELoss()
+
+    def normalize_weight(self, x):
+        min_val = x.min()
+        max_val = x.max()
+        x = (x - min_val) / (max_val - min_val)
+        #print(torch.mean(x))
+        x = x/torch.mean(x)
+        #assert (x > 1.0).any() or (x < 0.0).any()
+        #x = (x-torch.mean(x))/torch.std(x)
+        return x.detach()
+
+    def reverse_sigmoid(self, y):
+        return torch.log(y / (1.0 - y + 1e-10) + 1e-10)
+    def get_src_weights(self, domain_out, before_softmax, domain_temperature=1.0, class_temperature=10.0):
+        before_softmax = before_softmax / class_temperature
+        after_softmax = nn.Softmax(-1)(before_softmax)
+        domain_logit = self.reverse_sigmoid(domain_out)
+        domain_logit = domain_logit / domain_temperature
+        domain_out = nn.Sigmoid()(domain_logit)
+
+        entropy = torch.sum(- after_softmax * torch.log(after_softmax + 1e-10), dim=1, keepdim=True)
+        entropy_norm = entropy / np.log(after_softmax.size(1))
+        #entropy_norm = self.normalize_weight(entropy_norm)
+        #assert (entropy_norm > 1.0).any() or (entropy_norm < 0.0).any() == False
+        weight = entropy_norm - domain_out
+        #print(max(weight))
+        weight = weight.detach()
+        return weight
+    def get_trg_weights(self, domain_out, before_softmax, domain_temperature=1.0, class_temperature=1.0):
+        return -1*self.get_src_weights(domain_out, before_softmax, domain_temperature, class_temperature)
+
+    def update(self, src_loader, trg_loader, avg_meter, logger):
+        # defining best and last model
+        best_src_risk = float('inf')
+        best_model = None
+
+        nb_pr_epochs = self.hparams["num_epochs_pr"]
+        for epoch in range(1, nb_pr_epochs+1):
+            self.pretrain_epoch(src_loader, avg_meter)
+
+            logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]') #TODO : self.hparams["num_pr_epochs"]
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        for epoch in range(1, self.hparams["num_epochs"] + 1):
+
+            # source pretraining loop
+            #self.pretrain_epoch(src_loader, avg_meter)
+
+            # training loop
+            self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
+
+            # saving the best model based on src risk
+            if (epoch + 1) % 10 == 0 and avg_meter['Src_cls_loss'].avg < best_src_risk:
+                best_src_risk = avg_meter['Src_cls_loss'].avg
+                best_model = deepcopy(self.network.state_dict())
+
+            logger.debug(f'[Epoch : {epoch}/{self.hparams["num_epochs"]}]')
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        last_model = self.network.state_dict()
+
+        return last_model, best_model
+
+    def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
+        # Combine dataloaders
+        # Method 1 (min len of both domains)
+        # joint_loader = enumerate(zip(src_loader, trg_loader))
+
+        # Method 2 (max len of both domains)
+        # joint_loader =enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+        joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+        num_batches = max(len(src_loader), len(trg_loader))
+
+        for step, ((src_x, src_y), (trg_x, _)) in joint_loader:
+
+            src_x, src_y, trg_x = src_x.to(self.device), src_y.to(self.device), trg_x.to(self.device)
+
+            p = float(step + epoch * num_batches) / self.hparams["num_epochs"] + 1 / num_batches
+            alpha = 2. / (1. + np.exp(-10 * p)) - 1
+
+            # zero grad
+            self.optimizer.zero_grad()
+            self.optimizer_disc.zero_grad()
+
+            domain_label_src = torch.ones(len(src_x)).to(self.device)
+            domain_label_trg = torch.zeros(len(trg_x)).to(self.device)
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)
+
+            # Task classification  Loss
+            src_cls_loss = self.cross_entropy(src_pred.squeeze(), src_y)
+
+            # Adv Domain Discriminator loss
+            # source
+            src_feat_reversed = ReverseLayerF.apply(src_feat, alpha)
+            src_adv_pred = self.adv_discriminator(src_feat_reversed)
+
+            # target
+            trg_feat_reversed = ReverseLayerF.apply(trg_feat, alpha)
+            trg_adv_pred = self.adv_discriminator(trg_feat_reversed)
+
+            # Domain classifier and weights computation
+            src_domain_pred = self.domain_classifier(src_feat)
+            trg_domain_pred = self.domain_classifier(trg_feat)
+
+            src_temp = 10
+            '''w_s = self.normalize_weight(self.conditional_entropy(src_domain_pred/src_temp)/np.log(len(src_domain_pred)) - src_domain_pred/src_temp)
+            w_t = self.normalize_weight(trg_domain_pred - self.conditional_entropy(trg_domain_pred)/np.log(len(trg_domain_pred)))'''
+            w_s = self.normalize_weight(self.get_src_weights(src_domain_pred, src_pred))
+            w_t = self.normalize_weight(self.get_trg_weights(trg_domain_pred, trg_pred))
+            # print(w_t)
+
+            src_domain_loss = self.bce(src_domain_pred.squeeze(), domain_label_src)
+            trg_domain_loss = self.bce(trg_domain_pred.squeeze(), domain_label_trg)
+
+            '''src_adv_loss = w_s * F.cross_entropy(src_adv_pred, domain_label_src.long(), reduction='none')
+            src_adv_loss = src_adv_loss.mean()
+            trg_adv_loss = w_t * F.cross_entropy(trg_adv_pred, domain_label_trg.long(), reduction='none')
+            trg_adv_loss = trg_adv_loss.mean()'''
+
+            src_adv_loss = w_s * F.binary_cross_entropy(src_adv_pred.squeeze(), domain_label_src, reduction='none')
+            src_adv_loss = src_adv_loss.mean()
+            trg_adv_loss = w_t * F.binary_cross_entropy(trg_adv_pred.squeeze(), domain_label_trg, reduction='none')
+            trg_adv_loss = trg_adv_loss.mean()
+
+            # Task classification  Loss
+            """mask = w_s < self.w_0/2
+            print("Wrong Src : ", mask.sum())
+            w_s2 = w_s.clone()
+            w_s2[mask] = 0
+            src_cls_loss = (w_s2)*F.cross_entropy(src_pred.squeeze(), src_y, reduction='none')
+            src_cls_loss = src_cls_loss.mean()"""
+
+            # Total domain loss
+            domain_loss = src_domain_loss + trg_domain_loss
+            adv_loss = src_adv_loss + trg_adv_loss
+
+            loss = self.hparams["src_cls_loss_wt"] * src_cls_loss + \
+                   self.hparams["domain_loss_wt"] * adv_loss
+
+            loss.backward(retain_graph=True)
+            domain_loss.backward()
+            self.optimizer.step()
+            self.optimizer_disc.step()
+
+            losses = {'Total_loss': loss.item(), 'Domain_loss': domain_loss.item(), 'Src_cls_loss': src_cls_loss.item(),
+                      "Adv Loss": adv_loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        self.feature_extractor.eval()
+        self.classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = self.feature_extractor(data)
+                predictions = self.classifier(features)
+                trg_domain_pred = self.domain_classifier(features)
+                w_t = trg_domain_pred - self.conditional_entropy(trg_domain_pred)/np.log(len(trg_domain_pred))
+                #print(w_t)
+                mask = w_t < self.w_0
+
+                if not src:
+                    predictions[mask.squeeze()] *= 0
+
+                if self.is_uniDA:
+                    mask = labels >= predictions.shape[-1]
+                    labels[mask] = predictions.shape[-1]
+
+                mask = labels < predictions.shape[-1]
+                # z = torch.zeros((len(predictions), 1))
+                # predictions = torch.cat((predictions, z.to(predictions.device)), dim=1)
+                loss = F.cross_entropy(predictions[mask], labels[mask])
+                total_loss.append(loss.detach().cpu().item())
+                # predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
+
+    def decision_function(self, preds):
+        mask = preds.sum(axis=1) == 0.0
+        confidence, pred = preds.max(dim=1)
+        pred[mask] = -1
+        return pred
+
+
+class OVANet(Algorithm):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(configs, backbone)
+
+
+        # optimizer and scheduler
+
+        #self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        # hparams
+        self.hparams = hparams
+        # device
+        self.device = device
+
+        # Domain Discriminator
+        self.open_set_classifier = classifierOVANet(configs)
+
+        self.optimizer_feature_gen = torch.optim.Adam(
+            list(self.feature_extractor.parameters()),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.optimizer_clasifier = torch.optim.Adam(
+            list(self.open_set_classifier.parameters()) + list(self.classifier.parameters()),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.entropy = Entropy()
+
+    def ova_loss(self, open_preds, label):
+        assert len(open_preds.size()) == 3
+        assert open_preds.size(1) == 2
+
+        out_open = F.softmax(open_preds, 1)
+        label_p = torch.zeros((out_open.size(0),
+                               out_open.size(2))).long().cuda()
+        label_range = torch.range(0, out_open.size(0) - 1).long()
+        label_p[label_range, label] = 1
+        label_n = 1 - label_p
+        open_loss_pos = torch.mean(torch.sum(-torch.log(out_open[:, 1, :]
+                                                        + 1e-8) * label_p, 1))
+        open_loss_neg = torch.mean(torch.max(-torch.log(out_open[:, 0, :] +
+                                                        1e-8) * label_n, 1)[0])
+        return open_loss_pos, open_loss_neg
+
+    def open_entropy(self, open_preds):
+        assert len(open_preds.size()) == 3
+        assert open_preds.size(1) == 2
+        out_open = F.softmax(open_preds, 1)
+        ent_open = torch.mean(torch.mean(torch.sum(-out_open * torch.log(out_open + 1e-8), 1), 1))
+        return ent_open
+
+    def entropy(self, p, prob=True, mean=True):
+        if prob:
+            p = F.softmax(p)
+        en = -torch.sum(p * torch.log(p + 1e-5), 1)
+        if mean:
+            return torch.mean(en)
+        else:
+            return en
+
+    def update(self, src_loader, trg_loader, avg_meter, logger):
+        # defining best and last model
+        best_src_risk = float('inf')
+        best_model = None
+
+        nb_pr_epochs = self.hparams["num_epochs_pr"]
+        for epoch in range(1, nb_pr_epochs+1):
+            self.pretrain_epoch(src_loader, avg_meter)
+
+            logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]') #TODO : self.hparams["num_pr_epochs"]
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        for epoch in range(1, self.hparams["num_epochs"] + 1):
+
+            # source pretraining loop
+            #self.pretrain_epoch(src_loader, avg_meter)
+
+            # training loop
+            self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
+
+            # saving the best model based on src risk
+            if (epoch + 1) % 10 == 0 and avg_meter['Src_cls_loss'].avg < best_src_risk:
+                best_src_risk = avg_meter['Src_cls_loss'].avg
+                best_model = deepcopy(self.network.state_dict())
+
+            logger.debug(f'[Epoch : {epoch}/{self.hparams["num_epochs"]}]')
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        last_model = self.network.state_dict()
+
+        return last_model, best_model
+
+    def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
+        # Combine dataloaders
+        # Method 1 (min len of both domains)
+        # joint_loader = enumerate(zip(src_loader, trg_loader))
+
+        # Method 2 (max len of both domains)
+        # joint_loader =enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+        joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+        num_batches = max(len(src_loader), len(trg_loader))
+
+        for step, ((src_x, src_y), (trg_x, _)) in joint_loader:
+
+            src_x, src_y, trg_x = src_x.to(self.device), src_y.to(self.device), trg_x.to(self.device)
+
+            p = float(step + epoch * num_batches) / self.hparams["num_epochs"] + 1 / num_batches
+            alpha = 2. / (1. + np.exp(-10 * p)) - 1
+
+            # zero grad
+            self.optimizer_clasifier.zero_grad()
+            self.optimizer_feature_gen.zero_grad()
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+            src_open = self.open_set_classifier(src_feat)
+            src_open = src_open.view(src_open.size(0), 2, -1)
+
+            src_cls_loss = self.cross_entropy(src_pred.squeeze(), src_y)
+            open_loss_pos, open_loss_neg = self.ova_loss(src_open, src_y)
+            ## b x 2 x C
+            loss_open = 0.5 * (open_loss_pos + open_loss_neg)
+            total_loss = loss_open + src_cls_loss
+
+            trg_feat = self.feature_extractor(trg_x)
+            trg_open_pred = self.open_set_classifier(trg_feat)
+            trg_open_pred = trg_open_pred.view(trg_open_pred.size(0), 2, -1)
+
+            out_open_t = trg_open_pred.view(trg_x.size(0), 2, -1)
+            ent_open = self.open_entropy(out_open_t)
+            total_loss += ent_open
+
+            total_loss.backward()
+            self.optimizer_feature_gen.step()
+            self.optimizer_clasifier.step()
+            self.optimizer_feature_gen.zero_grad()
+            self.optimizer_clasifier.zero_grad()
+
+            losses = {'Total_loss': total_loss.item(), 'Open Loss': loss_open.item(), 'Src_cls_loss': src_cls_loss.item(),
+                      "Entropy Open": ent_open.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        feature_extractor = self.feature_extractor.to(self.device)
+        classifier = self.classifier.to(self.device)
+
+        feature_extractor.eval()
+        classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = self.feature_extractor(data)
+                predictions = F.softmax(self.classifier(features))
+                open_preds = self.open_set_classifier(features)
+
+                # open_class = len(predictions.shape[0])
+
+                conf, pred = predictions.max(dim=1)
+                # entr = -1*torch.sum(predictions*torch.log(predictions), 1).data.cpu().numpy()
+
+                open_preds = F.softmax(open_preds.view(predictions.size(0), 2, -1), 1)
+                tmp_range = torch.range(0, predictions.size(0) - 1).long().cuda()
+                pred_unk = open_preds[tmp_range, 0, pred]
+                ind_unk = np.where(pred_unk.data.cpu().numpy() > 0.5)[0]
+                pred[ind_unk] = predictions.shape[-1]
+                #mask = labels >= predictions.shape[-1]
+                mask = ind_unk
+
+                if not src:
+                    predictions[mask.squeeze()] *= 0
+
+                if self.is_uniDA:
+                    mask = labels >= predictions.shape[-1]
+                    labels[mask] = predictions.shape[-1]
+
+                mask = labels < predictions.shape[-1]
+                # z = torch.zeros((len(predictions), 1))
+                # predictions = torch.cat((predictions, z.to(predictions.device)), dim=1)
+                loss = F.cross_entropy(predictions[mask], labels[mask])
+                total_loss.append(loss.detach().cpu().item())
+                # predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
+    def decision_function(self, preds):
+        mask = preds.sum(axis=1) == 0.0
+        confidence, pred = preds.max(dim=1)
+        pred[mask] = -1
+        return pred
+
+class DANCE(Algorithm):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(configs, backbone)
+
+        # optimizer and scheduler
+
+        # self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        # hparams
+        self.hparams = hparams
+        # device
+        self.device = device
+        self.classifier = classifierNoBias(configs)
+        self.rho = np.log(self.configs.num_classes)/2.0
+
+        self.optimizer_feature_gen = torch.optim.Adam(
+            list(self.feature_extractor.parameters()),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.optimizer_clasifier = torch.optim.Adam(
+            self.classifier.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.entropy = Entropy()
+
+    def init_memory(self, trg_loader):
+        self.ndata = len(trg_loader.dataset.y_data)
+        '''for (trg_x, _, _) in trg_loader:
+            self.ndata += len(trg_x)'''
+        print(self.ndata)
+        self.lemniscate = LinearAverage(16, self.ndata).to(self.device)
+
+    def entropy(self, p):
+        p = F.softmax(p)
+        return -torch.mean(torch.sum(p * torch.log(p + 1e-5), 1))
+
+    def entropy_margin(self, p, value, margin=0.2, weight=None):
+        p = F.softmax(p)
+        return -torch.mean(self.hinge(torch.abs(-torch.sum(p * torch.log(p + 1e-5), 1) - value), margin))
+
+    def hinge(self, input, margin=0.2):
+        return torch.clamp(input, min=margin)
+
+    def update(self, src_loader, trg_loader, avg_meter, logger):
+        self.init_memory(trg_loader)
+        # defining best and last model
+        best_src_risk = float('inf')
+        best_model = None
+
+        nb_pr_epochs = self.hparams["num_epochs_pr"]
+        for epoch in range(1, nb_pr_epochs + 1):
+            self.pretrain_epoch(src_loader, avg_meter)
+
+            logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]')  # TODO : self.hparams["num_pr_epochs"]
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        for epoch in range(1, self.hparams["num_epochs"] + 1):
+
+            # source pretraining loop
+            # self.pretrain_epoch(src_loader, avg_meter)
+
+            # training loop
+            self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
+
+            # saving the best model based on src risk
+            if (epoch + 1) % 10 == 0 and avg_meter['Src_cls_loss'].avg < best_src_risk:
+                best_src_risk = avg_meter['Src_cls_loss'].avg
+                best_model = deepcopy(self.network.state_dict())
+
+            logger.debug(f'[Epoch : {epoch}/{self.hparams["num_epochs"]}]')
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        last_model = self.network.state_dict()
+
+        return last_model, best_model
+
+    def pretrain_epoch(self, src_loader, avg_meter):
+
+        for src_x, src_y, _ in src_loader:
+            src_x, src_y = src_x.to(self.device), src_y.to(self.device)
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            src_cls_loss = self.cross_entropy(src_pred, src_y)
+
+            loss = src_cls_loss
+
+            self.optimizer.zero_grad()
+
+            loss.backward()
+
+            self.optimizer.step()
+
+            losses = {'Pr_Src_cls_loss': loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+    def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
+        # Combine dataloaders
+        # Method 1 (min len of both domains)
+        # joint_loader = enumerate(zip(src_loader, trg_loader))
+
+        # Method 2 (max len of both domains)
+        # joint_loader =enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+        joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+        num_batches = max(len(src_loader), len(trg_loader))
+
+        for step, ((src_x, src_y, _), (trg_x, _, trg_index)) in joint_loader:
+
+            src_x, src_y, trg_x, trg_index = src_x.to(self.device), src_y.to(self.device), trg_x.to(self.device), trg_index.to(self.device)
+
+            # zero grad
+            self.optimizer_clasifier.zero_grad()
+            self.optimizer_feature_gen.zero_grad()
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            src_cls_loss = self.cross_entropy(src_pred.squeeze(), src_y)
+
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)
+            trg_feat = F.normalize(trg_feat)
+
+            feat_mat = self.lemniscate(trg_feat, trg_index)
+            feat_mat[:, trg_index] = -1.0
+            ### Calculate mini-batch x mini-batch similarity
+
+            feat_mat2 = torch.matmul(trg_feat, trg_feat.t())
+            mask = torch.eye(feat_mat2.size(0), feat_mat2.size(0)).bool().to(self.device)
+            feat_mat2.masked_fill_(mask, -1)
+
+            loss_nc = self.hparams["eta"] * self.entropy(torch.cat([trg_pred, feat_mat,feat_mat2], 1))
+            loss_ent = self.hparams["eta"] * self.entropy_margin(trg_pred, self.rho, self.hparams["margin"])
+            total_loss = loss_nc + src_cls_loss + loss_ent
+
+            total_loss.backward()
+            self.optimizer_feature_gen.step()
+            self.optimizer_clasifier.step()
+            self.optimizer_feature_gen.zero_grad()
+            self.optimizer_clasifier.zero_grad()
+
+            self.lemniscate.update_weight(trg_feat, trg_index)
+
+            losses = {'Total_loss': total_loss.item(), 'Ent Loss': loss_ent.item(),
+                      'Src_cls_loss': src_cls_loss.item(),
+                      "Neighbors Clustering ": loss_nc.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        feature_extractor = self.feature_extractor.to(self.device)
+        classifier = self.classifier.to(self.device)
+
+        feature_extractor.eval()
+        classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels, _ in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = self.feature_extractor(data)
+                predictions = F.softmax(self.classifier(features))
+
+                entr = -torch.sum(predictions * torch.log(predictions), 1).data.cpu().numpy()
+
+                conf, pred = predictions.max(dim=1)
+
+                pred_unk = np.where(entr > self.rho)
+                pred[pred_unk] = predictions.shape[-1]
+                mask = pred_unk
+                #mask = labels >= predictions.shape[-1]
+
+                if not src:
+                    predictions[mask] *= 0
+
+                if self.is_uniDA:
+                    mask = labels >= predictions.shape[-1]
+                    labels[mask] = predictions.shape[-1]
+                mask = labels < predictions.shape[-1]
+                #z = torch.zeros((len(predictions), 1))
+                #predictions = torch.cat((predictions, z.to(predictions.device)), dim=1)
+                loss = F.cross_entropy(predictions[mask], labels[mask])
+                total_loss.append(loss.detach().cpu().item())
+                # predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
+
+    def get_latent_features(self, dataloader):
+        feature_set = []
+        label_set = []
+        self.feature_extractor.eval()
+        self.classifier.eval()
+        with torch.no_grad():
+            for _, (data, label, _) in enumerate(dataloader):
+                data = data.to(self.device)
+                feature = self.classifier(self.feature_extractor(data))
+                feature_set.append(feature.cpu())
+                label_set.append(label.cpu())
+            feature_set = torch.cat(feature_set, dim=0)
+            feature_set = F.normalize(feature_set, p=2, dim=-1)
+            label_set = torch.cat(label_set, dim=0)
+        return feature_set, label_set
+    def decision_function(self, preds):
+        mask = preds.sum(axis=1) == 0.0
+        confidence, pred = preds.max(dim=1)
+        pred[mask] = -1
+        return pred
+
+    '''def evaluate(self, test_loader, trg_private_class, src=False):
+        self.feature_extractor.eval()
+        self.classifier.eval()
+        self.open_set_classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = self.feature_extractor(data)
+                predictions = F.softmax(self.classifier(features))
+                open_preds = self.open_set_classifier(features)
+
+                #open_class = len(predictions.shape[0])
+
+                conf, pred = predictions.max(dim=1)
+                #entr = -1*torch.sum(predictions*torch.log(predictions), 1).data.cpu().numpy()
+
+                open_preds = F.softmax(open_preds.view(predictions.size(0), 2, -1), 1)
+                tmp_range = torch.range(0, predictions.size(0) - 1).long().cuda()
+                pred_unk = open_preds[tmp_range, 0, pred]
+                ind_unk = np.where(pred_unk.data.cpu().numpy() > 0.5)[0]
+                pred[ind_unk] = len(predictions.shape[0])
+
+                mask = ind_unk
+
+                if not src:
+                    predictions[mask.squeeze()] *= 0
+
+                if src and self.is_uniDA:
+                    corr_preds = self.algorithm.correct_predictions(predictions)
+                    loss = F.cross_entropy(corr_preds, labels, reduction="none")
+                    # loss = F.cross_entropy(predictions[m], labels[m])
+                else:
+                    # m = torch.isin(labels, self.trg_private_class.view((-1)).long().to(self.device), invert=True)
+                    m = torch.isin(labels.cpu(), trg_private_class, invert=True)
+                    loss = F.cross_entropy(predictions[m], labels[m])
+
+                total_loss.append(loss.detach().cpu().item())
+                # predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels'''
+
+
+class OPDA_BP(Algorithm):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(configs, backbone)
+
+
+        # optimizer and scheduler
+
+        #self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        # hparams
+        self.hparams = hparams
+        # device
+        self.device = device
+
+
+        self.optimizer = torch.optim.Adam(
+            self.feature_extractor.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.optimizer_disc = torch.optim.Adam(
+            self.classifier.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.t = hparams["t"]
+
+        #self.bce = BCEWithLogitsLoss()
+        self.bce = BCELoss()
+        self.is_uniDA = True
+
+    def my_bce(self, p):
+        return torch.log(p) - torch.log(1-p)
+    def update(self, src_loader, trg_loader, avg_meter, logger):
+        # defining best and last model
+        best_src_risk = float('inf')
+        best_model = None
+
+        nb_pr_epochs = self.hparams["num_epochs_pr"]
+        for epoch in range(1, nb_pr_epochs+1):
+            self.pretrain_epoch(src_loader, avg_meter)
+
+            logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]') #TODO : self.hparams["num_pr_epochs"]
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        for epoch in range(1, self.hparams["num_epochs"] + 1):
+
+            # source pretraining loop
+            #self.pretrain_epoch(src_loader, avg_meter)
+
+            # training loop
+            self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
+
+            # saving the best model based on src risk
+            if (epoch + 1) % 10 == 0 and avg_meter['Src_cls_loss'].avg < best_src_risk:
+                best_src_risk = avg_meter['Src_cls_loss'].avg
+                best_model = deepcopy(self.network.state_dict())
+
+            logger.debug(f'[Epoch : {epoch}/{self.hparams["num_epochs"]}]')
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        last_model = self.network.state_dict()
+
+        return last_model, best_model
+    def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
+        joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+        num_batches = max(len(src_loader), len(trg_loader))
+
+        for step, ((src_x, src_y), (trg_x, _)) in joint_loader:
+
+            src_x, src_y, trg_x = src_x.to(self.device), src_y.to(self.device), trg_x.to(self.device)
+
+            p = float(step + epoch * num_batches) / self.hparams["num_epochs"] + 1 / num_batches
+            alpha = 2. / (1. + np.exp(-10 * p)) - 1
+
+            # zero grad
+            self.optimizer.zero_grad()
+            self.optimizer_disc.zero_grad()
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            # Task classification  Loss
+            src_cls_loss = self.cross_entropy(src_pred.squeeze(), src_y)
+
+            src_cls_loss.backward()
+            self.optimizer.step()
+            self.optimizer_disc.step()
+
+
+            self.optimizer.zero_grad()
+            self.optimizer_disc.zero_grad()
+            trg_feat = self.feature_extractor(trg_x)
+            rev_trg_feat = ReverseLayerF.apply(trg_feat, alpha)
+            trg_pred = self.classifier(rev_trg_feat)
+            trg_soft = F.softmax(trg_pred)
+
+            prob1 = torch.sum(trg_soft[:, :- 1], 1).view(-1, 1)
+            #prob2 = trg_soft[:, - 1].contiguous().view(-1, 1)
+            prob2 = trg_soft[:, - 1].view(-1, 1)
+
+
+            target_funk = torch.FloatTensor(trg_pred.size()[0]).fill_(0.5).cuda()
+            #target_funk = torch.FloatTensor(trg_pred.size()[0], 2).fill_(0.5).cuda()
+
+            #prob = F.softmax(torch.cat((prob1, prob2), 1))
+            prob = torch.cat((prob1, prob2), 1)
+
+
+            #print(prob.shape, target_funk.shape, prob.max(), prob.min())
+            #loss_t = self.bce(prob1.squeeze(), target_funk)
+            loss_t = self.bce(prob2.squeeze(), target_funk)
+            #loss_t = self.my_bce(prob2.squeeze())
+            #loss_t = self.mybce(prob2.squeeze())
+
+
+            loss_t.backward()
+            self.optimizer.step()
+            self.optimizer_disc.step()
+
+            losses = {'Src_cls_loss': src_cls_loss.item()}
+            losses["Adv Loss"] = loss_t.item()
+            losses["Adv Loss"] = src_cls_loss.item() + loss_t.item()
+
+            losses = {'Total_loss': src_cls_loss.item() + loss_t.item(), 'Src_cls_loss': src_cls_loss.item(), 'Adv Loss' : loss_t.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        feature_extractor = self.feature_extractor.to(self.device)
+        classifier = self.classifier.to(self.device)
+
+        feature_extractor.eval()
+        classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = feature_extractor(data)
+                predictions = classifier(features)
+
+                if self.is_uniDA:
+                    mask = labels >= predictions.shape[-1]-1
+                    labels[mask] = predictions.shape[-1]-1
+                loss = F.cross_entropy(predictions, labels)
+                total_loss.append(loss.detach().cpu().item())
+                #predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
+    def decision_function(self, preds):
+        confidence, pred = preds.max(dim=1)
+        mask = (pred == (preds.shape[-1] -1))
+        pred[mask] = -1
+        return pred
 
 # Untied Approaches: (MCD)
 class MCD(Algorithm):
@@ -1165,6 +2145,7 @@ class MCD(Algorithm):
         # Aligment losses
         #self.mmd_loss = MMD_loss() #Not useful ?!
 
+
     def update(self, src_loader, trg_loader, avg_meter, logger):
         # defining best and last model
         best_src_risk = float('inf')
@@ -1172,10 +2153,10 @@ class MCD(Algorithm):
 
         for epoch in range(1, self.hparams["num_epochs"] + 1):
 
-            # source pretraining loop 
+            # source pretraining loop
             self.pretrain_epoch(src_loader, avg_meter)
 
-            # training loop 
+            # training loop
             self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
 
             # saving the best model based on src risk
@@ -1465,6 +2446,7 @@ class DeepJDOT(Algorithm):
             src_y = torch.eye(self.nb_classes, dtype=torch.int8).to(self.device)[src_y]
 
             C0 = torch.cdist(src_feat, trg_feat, p=2.0)**2
+            #print(src_y.shape, self.softmax(trg_pred).shape)
             C1 = torch.cdist(src_y.double(), self.softmax(trg_pred).double(), p=2.0)**2  # COMMENT : I put log_softmax
             C = self.hparams["jdot_alpha"] * C0 + self.hparams["jdot_lambda"] * C1
             self.gamma = ot.emd(torch.Tensor(ot.unif(src_x.shape[0])).to(self.device), torch.Tensor(ot.unif(trg_x.shape[0])).to(self.device), C)
@@ -1623,29 +2605,6 @@ class PPOT(Algorithm):
 
         return last_model, best_model
 
-    def pretrain_epoch(self, src_loader, avg_meter):
-
-        for src_x, src_y in src_loader:
-            src_x, src_y = src_x.to(self.device), src_y.to(self.device)
-
-            src_feat = self.feature_extractor(src_x)
-            src_pred = self.classifier(src_feat)
-
-            src_cls_loss = self.cross_entropy(src_pred, src_y)
-
-            loss = src_cls_loss
-
-            self.optimizer.zero_grad()
-
-            loss.backward()
-
-            self.optimizer.step()
-
-            losses = {'Pr_Src_cls_loss': loss.item()}
-
-            for key, val in losses.items():
-                avg_meter[key].update(val, 32)
-
     def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
         joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
         self.feature_extractor.train()
@@ -1680,7 +2639,7 @@ class PPOT(Algorithm):
             match = self.alpha / self.beta
             assert not np.isnan(match)
             #match = max(match, self.alpha+0.001)
-            print("alpha/beta : ", match)
+            #print("alpha/beta : ", match)
 
             # update source prototype by moving average
             self.src_prototype = self.src_prototype.detach().cpu() #Else try to re-backprog on previous value
@@ -1765,21 +2724,103 @@ class PPOT(Algorithm):
         for key, val in losses.items():
             avg_meter[key].update(val, 32)
 
-    def decision_function(self, preds):
-        preds = self.softmax(preds)
-        confidence, pred = preds.max(dim=1)
-        pred[confidence < self.hparams["thresh"]] = -1
 
-        """mask = preds.max()< self.hparams["thresh"]
-        res = preds.argmax(dim=1)
-        res[mask] = -1"""
-        return pred
-    def correct_predictions(self, preds):
-        print("Correction")
-        preds = self.softmax(preds)
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        self.feature_extractor.eval()
+        self.classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = self.feature_extractor(data)
+                predictions = F.softmax(self.classifier(features))
+                confidence, pred = predictions.max(dim=1)
+                pred[confidence < self.hparams["thresh"]] = None
+
+                #w_t = trg_domain_pred - self.conditional_entropy(trg_domain_pred)/np.log(len(trg_domain_pred))
+                #print(w_t)
+                #mask = w_t < self.w_0
+
+                if not src:
+                    mask = None
+                    predictions[mask.squeeze()] *= 0
+
+                if src and self.is_uniDA:
+                    corr_preds = self.algorithm.correct_predictions(predictions)
+                    loss = F.cross_entropy(corr_preds, labels, reduction="none")
+                    # loss = F.cross_entropy(predictions[m], labels[m])
+                else:
+                    # m = torch.isin(labels, self.trg_private_class.view((-1)).long().to(self.device), invert=True)
+                    m = torch.isin(labels.cpu(), trg_private_class, invert=True)
+                    loss = F.cross_entropy(predictions[m], labels[m])
+
+                total_loss.append(loss.detach().cpu().item())
+                # predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        feature_extractor = self.feature_extractor.to(self.device)
+        classifier = self.classifier.to(self.device)
+
+        feature_extractor.eval()
+        classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = self.feature_extractor(data)
+                predictions = F.softmax(self.classifier(features))
+
+                features = self.feature_extractor(data)
+                predictions = F.softmax(self.classifier(features))
+                confidence, pred = predictions.max(dim=1)
+                mask = confidence < self.hparams["thresh"]
+                if not src:
+                    predictions[mask] *= 0
+
+                if self.is_uniDA:
+                    mask = labels >= predictions.shape[-1]
+                    labels[mask] = predictions.shape[-1]
+
+                mask = labels < predictions.shape[-1]
+                # z = torch.zeros((len(predictions), 1))
+                # predictions = torch.cat((predictions, z.to(predictions.device)), dim=1)
+                loss = F.cross_entropy(predictions[mask], labels[mask])
+                total_loss.append(loss.detach().cpu().item())
+                # predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
+    def decision_function(self, preds):
+        mask = preds.sum(axis=1) == 0.0
         confidence, pred = preds.max(dim=1)
-        preds[confidence < self.hparams["thresh"]] *= 0
-        return preds
+        pred[mask] = -1
+        return pred
+
 class PseudoInverse(nn.Module):
     def __init__(self, k=5):
         super(PseudoInverse, self).__init__()
@@ -1804,7 +2845,6 @@ class PseudoInverse(nn.Module):
         S_k_inv = torch.diag(1.0 / (S[:self.k]))#+eps))
         X_pseudo_inv = torch.mm(U_k, torch.mm(S_k_inv, U_k.t()))
         return X_pseudo_inv
-
 class JPOT(Algorithm):
     def __init__(self, backbone, configs, hparams, device):
         super().__init__(configs, backbone)
@@ -2175,22 +3215,499 @@ class JPOT(Algorithm):
             for key, val in losses.items():
                 avg_meter[key].update(val, 32)
 
-    def decision_function(self, preds):
-        preds = self.softmax(preds)
-        confidence, pred = preds.max(dim=1)
-        pred[confidence < self.hparams["thresh"]] = -1
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        feature_extractor = self.feature_extractor.to(self.device)
+        classifier = self.classifier.to(self.device)
 
-        """mask = preds.max()< self.hparams["thresh"]
-        res = preds.argmax(dim=1)
-        res[mask] = -1"""
+        feature_extractor.eval()
+        classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = self.feature_extractor(data)
+                predictions = F.softmax(self.classifier(features))
+
+                features = self.feature_extractor(data)
+                predictions = F.softmax(self.classifier(features))
+                confidence, pred = predictions.max(dim=1)
+                mask = confidence < self.hparams["thresh"]
+                if not src:
+                    predictions[mask] *= 0
+
+                if self.is_uniDA:
+                    mask = labels >= predictions.shape[-1]
+                    labels[mask] = predictions.shape[-1]
+
+                mask = labels < predictions.shape[-1]
+                # z = torch.zeros((len(predictions), 1))
+                # predictions = torch.cat((predictions, z.to(predictions.device)), dim=1)
+                loss = F.cross_entropy(predictions[mask], labels[mask])
+                total_loss.append(loss.detach().cpu().item())
+                # predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
+    def decision_function(self, preds):
+        mask = preds.sum(axis=1) == 0.0
+        confidence, pred = preds.max(dim=1)
+        pred[mask] = -1
         return pred
 
-    def correct_predictions(self, preds):
-        print("Correction")
-        preds = self.softmax(preds)
+class DeepCOT2(Algorithm):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(configs, backbone)
+
+        self.feature_extractor = backbone(configs)
+        self.classifier = classifier(configs)
+        self.network = nn.Sequential(self.feature_extractor, self.classifier)
+        self.random_layer = RandomLayer([configs.features_len * configs.final_out_channels, configs.num_classes],
+                                        configs.features_len * configs.final_out_channels*10, device)
+
+        # initialize the gamma (coupling in OT) with zeros
+        self.gamma = torch.zeros(hparams["batch_size"],hparams["batch_size"]) #.dnn.K.zeros(shape=(self.batch_size, self.batch_size))
+        # hparams
+        self.hparams = hparams
+        self.nb_classes = configs.num_classes
+        # device
+        self.device = device
+        self.gamma.to(self.device)
+
+        #OT method
+        self.ot_method = "emd"
+        self.jdot_alpha = hparams["jdot_alpha"]
+
+        self.optimizer = torch.optim.Adam(
+            self.network.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.softmax = torch.nn.Softmax()
+
+    def classifier_cat_loss(self, src_y, trg_pred):
+        '''
+        classifier loss based on categorical cross entropy in the target domain
+        1:batch_size - is source samples
+        batch_size:end - is target samples
+        self.gamma - is the optimal transport plan
+        '''
+        # source cross entropy loss
+        label_loss = -1*torch.matmul(src_y.float(), self.softmax(trg_pred).T)
+        return torch.sum(self.gamma * label_loss)
+
+    # L2 distance
+    def L2_dist(self, x, y):
+        '''
+        compute the squared L2 distance between two matrics
+        '''
+        distx = torch.reshape(torch.sum(torch.square(x), 1), (-1, 1))
+        disty = torch.reshape(torch.sum(torch.square(y), 1), (1, -1))
+        dist = distx + disty
+        dist -= 2.0 * torch.matmul(x, torch.transpose(y, 0, 1))
+        return dist
+
+    # feature allignment loss
+    def align_loss2(self, src_feat, trg_feat):
+        #gdist = self.L2_dist(src_feat, trg_feat)
+        gdist = (src_feat-trg_feat).square().sum()
+        return torch.sum(self.gamma * gdist)
+
+    def align_loss(self, src_feat, trg_feat):
+        gdist = self.L2_dist(src_feat, trg_feat)
+        return torch.sum(self.gamma * (gdist))
+
+    def to_categorical(self, y):
+        """ 1-hot encodes a tensor """
+        return torch.eye(self.nb_classes, dtype=torch.int8)[y]
+
+    def update(self, src_loader, trg_loader, avg_meter, logger):
+        # defining best and last model
+        best_src_risk = float('inf')
+        best_model = None
+
+        nb_pr_epochs = self.hparams["num_epochs_pr"]
+        for epoch in range(1, nb_pr_epochs+1):
+            self.pretrain_epoch(src_loader, avg_meter)
+
+            logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]') #TODO : self.hparams["num_pr_epochs"]
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        for epoch in range(1, self.hparams["num_epochs"] + 1):
+
+            # source pretraining loop
+            #self.pretrain_epoch(src_loader, avg_meter)
+
+            # training loop
+            self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
+
+            # saving the best model based on src risk
+            if (epoch + 1) % 10 == 0 and avg_meter['Src_cls_loss'].avg < best_src_risk:
+                best_src_risk = avg_meter['Src_cls_loss'].avg
+                best_model = deepcopy(self.network.state_dict())
+
+            logger.debug(f'[Epoch : {epoch}/{self.hparams["num_epochs"]}]')
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        last_model = self.network.state_dict()
+
+        return last_model, best_model
+    def pretrain_epoch(self, src_loader, avg_meter):
+
+        for src_x, src_y in src_loader:
+            src_x, src_y = src_x.to(self.device), src_y.to(self.device)
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            src_cls_loss = self.cross_entropy(src_pred, src_y)
+
+            loss = src_cls_loss
+
+            self.optimizer.zero_grad()
+
+            loss.backward()
+
+            self.optimizer.step()
+
+            losses = {'Pr_Src_cls_loss': loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+    def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
+
+        # Construct Joint Loaders
+        joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+
+        for step, ((src_x, src_y), (trg_x, _)) in joint_loader:
+            """if src_x.shape[0] != trg_x.shape[0]:
+                continue"""
+            if src_x.shape[0] > trg_x.shape[0]:
+                src_x = src_x[:trg_x.shape[0]]
+                src_y = src_y[:trg_x.shape[0]]
+            elif trg_x.shape[0] > src_x.shape[0]:
+                trg_x = trg_x[:src_x.shape[0]]
+
+            src_x, src_y, trg_x = src_x.to(self.device), src_y.to(self.device), trg_x.to(
+                self.device)  # extract source features
+
+            #Freeze Neural Network
+            for k,v in self.feature_extractor.named_parameters():
+                v.requires_grad = False
+            for k,v in self.classifier.named_parameters():
+                v.requires_grad = False
+
+            # extract source features
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+            #extract target features
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)
+
+
+            src_y = torch.eye(self.nb_classes, dtype=torch.int8).to(self.device)[src_y]
+
+            # src_feat, trg_feat = self.random_layer([src_feat, src_pred]), self.random_layer([trg_feat, trg_pred])
+            C0 = torch.cdist(src_feat, trg_feat, p=2.0)**2
+            C1 = torch.cdist(src_y.double(), self.softmax(trg_pred).double(), p=2.0)**2  # COMMENT : I put log_softmax
+            C2 = torch.cdist(self.random_layer([src_feat, src_pred]), self.random_layer([trg_feat, trg_pred]), p=2.0) ** 2
+            #C = self.hparams["jdot_alpha"] * C0 + self.hparams["jdot_lambda"] * C1
+            C = self.hparams["jdot_alpha"] * C0 + self.hparams["jdot_lambda"] * C1
+            self.gamma = 0.5*(ot.emd(torch.Tensor(ot.unif(src_x.shape[0])).to(self.device), torch.Tensor(ot.unif(trg_x.shape[0])).to(self.device), C)
+                          + 0.5*ot.emd(torch.Tensor(ot.unif(src_x.shape[0])).to(self.device), torch.Tensor(ot.unif(trg_x.shape[0])).to(self.device), self.hparams["jdot_alpha"] * C2))
+
+            # UnFreeze Neural Network
+            for k, v in self.feature_extractor.named_parameters():
+                v.requires_grad = True
+            for k, v in self.classifier.named_parameters():
+                v.requires_grad = True
+
+            # extract source features
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+            # extract target features
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)
+
+            #Compute Losses
+            feat_align_loss = self.hparams["jdot_alpha"] * self.align_loss(src_feat, trg_feat)
+            src_cls_loss = self.hparams["src_cls_loss_wt"] * self.cross_entropy(src_pred, src_y.double())
+            label_align_loss = self.hparams["jdot_lambda"] * self.classifier_cat_loss(src_y, trg_pred)
+            total_loss = src_cls_loss + feat_align_loss + label_align_loss
+
+            self.optimizer.zero_grad()
+
+            total_loss.backward()
+
+            self.optimizer.step()
+
+            losses = {'Total_loss': total_loss.item(), 'label_disc_loss': label_align_loss.item(), 'feat_disc_loss': feat_align_loss.item(),
+                      'Src_cls_loss': src_cls_loss.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+
+class OpenJDOT(Algorithm):
+    def __init__(self, backbone, configs, hparams, device):
+        super().__init__(configs, backbone)
+
+        # optimizer and scheduler
+
+        # self.lr_scheduler = StepLR(self.optimizer, step_size=hparams['step_size'], gamma=hparams['lr_decay'])
+        # hparams
+        self.hparams = hparams
+        # device
+        self.device = device
+
+        self.optimizer = torch.optim.Adam(
+            self.feature_extractor.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.optimizer_disc = torch.optim.Adam(
+            self.classifier.parameters(),
+            lr=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"]
+        )
+
+        self.t = hparams["t"]
+
+        # self.bce = BCEWithLogitsLoss()
+        self.bce = BCELoss()
+        self.is_uniDA = True
+        self.softmax = torch.nn.Softmax()
+        self.nb_classes = configs.num_classes
+
+    def my_bce(self, p):
+        return torch.log(p) - torch.log(1 - p)
+
+    def classifier_cat_loss(self, src_y, trg_pred):
+        '''
+        classifier loss based on categorical cross entropy in the target domain
+        1:batch_size - is source samples
+        batch_size:end - is target samples
+        self.gamma - is the optimal transport plan
+        '''
+        # source cross entropy loss
+        label_loss = -1*torch.matmul(src_y.float(), self.softmax(trg_pred).T)
+        return torch.sum(self.gamma * label_loss)
+
+    # L2 distance
+    def L2_dist(self, x, y):
+        '''
+        compute the squared L2 distance between two matrics
+        '''
+        distx = torch.reshape(torch.sum(torch.square(x), 1), (-1, 1))
+        disty = torch.reshape(torch.sum(torch.square(y), 1), (1, -1))
+        dist = distx + disty
+        dist -= 2.0 * torch.matmul(x, torch.transpose(y, 0, 1))
+        return dist
+
+    # feature allignment loss
+    def align_loss2(self, src_feat, trg_feat):
+        #gdist = self.L2_dist(src_feat, trg_feat)
+        gdist = (src_feat-trg_feat).square().sum()
+        return torch.sum(self.gamma * gdist)
+
+    def align_loss(self, src_feat, trg_feat):
+        gdist = self.L2_dist(src_feat, trg_feat)
+        return torch.sum(self.gamma * (gdist))
+
+    def update(self, src_loader, trg_loader, avg_meter, logger):
+        # defining best and last model
+        best_src_risk = float('inf')
+        best_model = None
+
+        nb_pr_epochs = self.hparams["num_epochs_pr"]
+        for epoch in range(1, nb_pr_epochs + 1):
+            self.pretrain_epoch(src_loader, avg_meter)
+
+            logger.debug(f'[Pr Epoch : {epoch}/{nb_pr_epochs}]')  # TODO : self.hparams["num_pr_epochs"]
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        for epoch in range(1, self.hparams["num_epochs"] + 1):
+
+            # source pretraining loop
+            # self.pretrain_epoch(src_loader, avg_meter)
+
+            # training loop
+            self.training_epoch(src_loader, trg_loader, avg_meter, epoch)
+
+            # saving the best model based on src risk
+            if (epoch + 1) % 10 == 0 and avg_meter['Src_cls_loss'].avg < best_src_risk:
+                best_src_risk = avg_meter['Src_cls_loss'].avg
+                best_model = deepcopy(self.network.state_dict())
+
+            logger.debug(f'[Epoch : {epoch}/{self.hparams["num_epochs"]}]')
+            for key, val in avg_meter.items():
+                logger.debug(f'{key}\t: {val.avg:2.4f}')
+            logger.debug(f'-------------------------------------')
+
+        last_model = self.network.state_dict()
+
+        return last_model, best_model
+
+    def training_epoch(self, src_loader, trg_loader, avg_meter, epoch):
+        joint_loader = enumerate(zip(src_loader, itertools.cycle(trg_loader)))
+        num_batches = max(len(src_loader), len(trg_loader))
+
+        for step, ((src_x, src_y), (trg_x, _)) in joint_loader:
+
+            src_x, src_y, trg_x = src_x.to(self.device), src_y.to(self.device), trg_x.to(self.device)
+
+            p = float(step + epoch * num_batches) / self.hparams["num_epochs"] + 1 / num_batches
+            alpha = 2. / (1. + np.exp(-10 * p)) - 1
+
+            # zero grad
+            self.optimizer.zero_grad()
+            self.optimizer_disc.zero_grad()
+
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+
+            # Task classification  Loss
+            src_cls_loss = self.cross_entropy(src_pred.squeeze(), src_y)
+
+            '''src_cls_loss.backward(retain_graph=True)
+            self.optimizer.step()
+            self.optimizer_disc.step()'''
+
+            self.optimizer.zero_grad()
+            self.optimizer_disc.zero_grad()
+            trg_feat = self.feature_extractor(trg_x)
+            rev_trg_feat = ReverseLayerF.apply(trg_feat, alpha)
+            trg_pred = self.classifier(trg_feat)
+            rev_trg_pred = self.classifier(rev_trg_feat)
+            trg_soft = F.softmax(rev_trg_pred)
+
+            prob1 = torch.sum(trg_soft[:, :- 1], 1).view(-1, 1)
+            # prob2 = trg_soft[:, - 1].contiguous().view(-1, 1)
+            prob2 = trg_soft[:, - 1].view(-1, 1)
+
+            target_funk = torch.FloatTensor(rev_trg_pred.size()[0]).fill_(0.5).cuda()
+            # target_funk = torch.FloatTensor(trg_pred.size()[0], 2).fill_(0.5).cuda()
+
+            # prob = F.softmax(torch.cat((prob1, prob2), 1))
+            prob = torch.cat((prob1, prob2), 1)
+
+            # print(prob.shape, target_funk.shape, prob.max(), prob.min())
+            # loss_t = self.bce(prob1.squeeze(), target_funk)
+            loss_t = self.bce(prob2.squeeze(), target_funk)
+            # loss_t = self.my_bce(prob2.squeeze())
+            # loss_t = self.mybce(prob2.squeeze())
+
+            """loss_t.backward()
+            self.optimizer.step()
+            self.optimizer_disc.step()"""
+
+
+
+            """self.optimizer.zero_grad()
+            self.optimizer_disc.zero_grad()
+
+            src_y = torch.eye(self.nb_classes, dtype=torch.int8).to(self.device)[src_y]
+            # extract source features
+            src_feat = self.feature_extractor(src_x)
+            src_pred = self.classifier(src_feat)
+            # extract target features
+            trg_feat = self.feature_extractor(trg_x)
+            trg_pred = self.classifier(trg_feat)"""
+            src_y2 = torch.eye(self.nb_classes, dtype=torch.int8).to(self.device)[src_y]
+            src_soft = F.softmax(src_pred)
+            prob_src = torch.sum(src_soft[:, :- 1], 1).view(-1, 1)
+            #trg_soft = F.softmax(trg_pred)
+            prob_trg = F.softmax(trg_pred[:, :- 1])
+            #prob_trg = trg_soft[:,:-1]
+            trg_mask = F.softmax(trg_pred)[:,-1] < (1/self.nb_classes)/2
+            #print(F.softmax(trg_pred)[:,-1])
+
+            with torch.no_grad():
+                C0 = torch.cdist(src_feat, trg_feat[trg_mask], p=2.0) ** 2
+                C1 = torch.cdist(src_y2[:,:-1].double(), prob_trg[trg_mask].double(), p=2.0) ** 2  # COMMENT : I put log_softmax
+                #C1 = torch.cdist(src_y2.double(), self.softmax(trg_pred).double(), p=2.0) ** 2  # COMMENT : I put log_softmax
+                #C = self.hparams["jdot_alpha"] * C0 + self.hparams["jdot_lambda"] * C1
+                C = 0.5 * (C0+C1)
+                self.gamma = ot.sinkhorn_lpl1_mm(torch.Tensor(ot.unif(src_x.shape[0])).to(self.device),
+                                    src_y, torch.Tensor(ot.unif(trg_x[trg_mask].shape[0])).to(self.device), C, 0.01)
+
+            # Compute Losses
+            feat_align_loss = self.hparams["jdot_alpha"] * self.align_loss(src_feat, trg_feat[trg_mask])
+            label_align_loss = self.classifier_cat_loss(src_y2, trg_pred[trg_mask])
+            ot_align = feat_align_loss + label_align_loss
+            loss_t += 0.05*ot_align
+
+            src_cls_loss.backward(retain_graph=True)
+            loss_t.backward(retain_graph=False)
+            #src_cls_loss.backward(retain_graph=False)
+            self.optimizer.step()
+            self.optimizer_disc.step()
+
+
+            losses = {'Src_cls_loss': src_cls_loss.item()}
+            losses["Adv Loss"] = loss_t.item()
+            losses["Total Loss"] = src_cls_loss.item() + loss_t.item()
+
+            losses = {'Total_loss': src_cls_loss.item() + loss_t.item(),
+                      'Src_cls_loss': src_cls_loss.item(), 'Adv Loss': loss_t.item(),
+                      "ot align": ot_align.item()}
+
+            for key, val in losses.items():
+                avg_meter[key].update(val, 32)
+
+    def evaluate(self, test_loader, trg_private_class, src=False):
+        feature_extractor = self.feature_extractor.to(self.device)
+        classifier = self.classifier.to(self.device)
+
+        feature_extractor.eval()
+        classifier.eval()
+
+        total_loss, preds_list, labels_list = [], [], []
+
+        with torch.no_grad():
+            for data, labels in test_loader:
+                data = data.float().to(self.device)
+                labels = labels.view((-1)).long().to(self.device)
+
+                # forward pass
+                features = feature_extractor(data)
+                predictions = classifier(features)
+
+                if self.is_uniDA:
+                    mask = labels >= predictions.shape[-1] - 1
+                    labels[mask] = predictions.shape[-1] - 1
+                loss = F.cross_entropy(predictions, labels)
+                total_loss.append(loss.detach().cpu().item())
+                # predictions = self.algorithm.correct_predictions(predictions)
+                pred = predictions.detach()  # .argmax(dim=1)  # get the index of the max log-probability
+
+                # append predictions and labels
+                preds_list.append(pred)
+                labels_list.append(labels)
+        loss = torch.tensor(total_loss).mean()  # average loss
+        full_preds = torch.cat((preds_list))
+        full_labels = torch.cat((labels_list))
+        return loss, full_preds, full_labels
+
+    def decision_function(self, preds):
         confidence, pred = preds.max(dim=1)
-        preds[confidence < self.hparams["thresh"]] *= 0
-        return preds
-        # self.lr_scheduler_fe.step()
-        # self.lr_scheduler_c1.step()
-        # self.lr_scheduler_c2.step()
+        mask = (pred == (preds.shape[-1] - 1))
+        pred[mask] = -1
+        return pred

@@ -35,6 +35,7 @@ class Trainer(AbstractTrainer):
             self.results_columns.append('H-score')
             self.results_columns.append("acc_c")
             self.results_columns.append("acc_p")
+            self.results_columns.append("acc_mix")
         self.risks_columns = ["scenario", "run", "src_risk", "few_shot_risk", "trg_risk"]
 
 
@@ -90,9 +91,12 @@ class Trainer(AbstractTrainer):
                     handler.close()
 
         # Calculate and append mean and std to tables
+
+        table_results = self.average_run_rusults(table_results)
+        table_risks = self.average_run_rusults(table_risks)
+
         table_results = self.add_mean_std_table(table_results, self.results_columns)
         table_risks = self.add_mean_std_table(table_risks, self.risks_columns)
-
 
         # Save tables to file if needed
         self.save_tables_to_file(table_results, 'results')

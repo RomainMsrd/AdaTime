@@ -9,9 +9,16 @@ sweep_train_hparams = {
         'optimizer':    {'values': ['adam']},
 }
 
-sweep_train_hparams2 = {
+sweep_train_hparams3 = {
         'num_epochs':   {'values': [70, 160, 250]},
         'num_epochs_pr':{'values': [50, 100]},
+        'batch_size':   {'values': [32, 64, 128]},
+        'weight_decay': {'values': [1e-4]}
+}
+
+sweep_train_hparams2 = {
+        'num_epochs':   {'values': [70]},
+        'num_epochs_pr':{'values': [50]},
         'batch_size':   {'values': [32, 64, 128]},
         'weight_decay': {'values': [1e-4]}
 }
@@ -142,6 +149,16 @@ sweep_alg_hparams = {
                 'm' : {'distribution': 'uniform', 'min': 0.1, 'max': 0.8},
                 "reg": {'values': [0.01, 0.1]},
                 "thresh": {'values': [0.1, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6]},
+            },
+        'UDA': {
+                'learning_rate': {'values': [5e-2, 1e-2, 5e-3, 1e-3, 5e-4]},
+                'src_cls_loss_wt':  {'distribution': 'uniform', 'min': 1e-1, 'max': 10},
+                'domain_loss_wt':   {'distribution': 'uniform', 'min': 1e-2, 'max': 10},
+                'w0': {'values': [0.05, 0.1, 0.2, 0.3, 0.5, 0.6]},
+            },
+        'OPDA_BP' :  {
+                'learning_rate': {'values': [5e-2, 1e-2, 5e-3, 1e-3, 5e-4]},
+                't': {'values': [0.4, 0.5, 0.6]},
             },
 
 }

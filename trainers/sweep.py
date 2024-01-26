@@ -52,7 +52,7 @@ class Trainer(AbstractTrainer):
         sweep_config = {
             'method': self.hp_search_strategy,
             'metric': {'name': self.metric_to_minimize, 'goal': 'minimize'},
-            'name': self.da_method + '_' + self.backbone,
+            'name': self.da_method + '_' + self.backbone + '_' + self.dataset,
             'parameters': {**sweep_alg_hparams[self.da_method], **sweep_train_hparams2}
         }
         if sweep_id is None:
@@ -75,6 +75,7 @@ class Trainer(AbstractTrainer):
             results_columns.append('H-score')
             results_columns.append("acc_c")
             results_columns.append("acc_p")
+            results_columns.append("acc_mix")
         #table_results = wandb.Table(columns=columns, allow_mixed_types=True)
         risks_columns = ["scenario", "run", "src_risk", "few_shot_risk", "trg_risk"]
         #table_risks = wandb.Table(columns=columns, allow_mixed_types=True)

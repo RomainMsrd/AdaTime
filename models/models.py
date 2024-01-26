@@ -74,7 +74,67 @@ class classifier(nn.Module):
 
         return predictions
 
+class classifierNoBias(nn.Module):
+    def __init__(self, configs):
+        super(classifierNoBias, self).__init__()
+        self.logits = nn.Linear(configs.features_len * configs.final_out_channels, configs.num_classes, bias=False)
+        self.configs = configs
 
+    def forward(self, x):
+
+        predictions = self.logits(x)
+
+        return predictions
+class classifierOVANet(nn.Module):
+    def __init__(self, configs):
+        super(classifierOVANet, self).__init__()
+        self.logits = nn.Linear(configs.features_len * configs.final_out_channels, configs.num_classes*2)
+        self.configs = configs
+
+    def forward(self, x):
+
+        predictions = self.logits(x)
+
+        return predictions
+
+class LinearAverage(nn.Module):
+    def __init__(self, inputSize, outputSize, T=0.05, momentum=0.0):
+        super(LinearAverage, self).__init__()
+        self.nLem = outputSize
+        self.momentum = momentum
+        self.register_buffer('params', torch.tensor([T, momentum]))
+        self.register_buffer('memory', torch.zeros(outputSize, inputSize))
+        self.flag = 0
+        self.T = T
+        self.memory = self.memory.cuda()
+    def forward(self, x, y):
+        #print(x.shape)
+        out = torch.mm(x, self.memory.t())/self.T
+        return out
+
+    def update_weight(self, features, index):
+        if not self.flag:
+            weight_pos = self.memory.index_select(0, index.data.view(-1)).resize_as_(features)
+            weight_pos.mul_(0.0)
+            weight_pos.add_(torch.mul(features.data, 1.0))
+
+            w_norm = weight_pos.pow(2).sum(1, keepdim=True).pow(0.5)
+            updated_weight = weight_pos.div(w_norm)
+            self.memory.index_copy_(0, index, updated_weight)
+            self.flag = 1
+        else:
+            weight_pos = self.memory.index_select(0, index.data.view(-1)).resize_as_(features)
+            weight_pos.mul_(self.momentum)
+            weight_pos.add_(torch.mul(features.data, 1 - self.momentum))
+
+            w_norm = weight_pos.pow(2).sum(1, keepdim=True).pow(0.5)
+            updated_weight = weight_pos.div(w_norm)
+            self.memory.index_copy_(0, index, updated_weight)
+        self.memory = F.normalize(self.memory)#.cuda()
+
+
+    def set_weight(self, features, index):
+        self.memory.index_copy_(0, index, features)
 
 ########## TCN #############################
 torch.backends.cudnn.benchmark = True  # might be required to fasten TCN
@@ -247,6 +307,27 @@ class Discriminator(nn.Module):
         out = self.layer(input)
         return out
 
+class DiscriminatorUDA(nn.Module):
+    """Discriminator model for source domain."""
+
+    def __init__(self, configs):
+        """Init discriminator."""
+        super(DiscriminatorUDA, self).__init__()
+
+        self.layer = nn.Sequential(
+            nn.Linear(configs.features_len * configs.final_out_channels, configs.disc_hid_dim),
+            nn.ReLU(),
+            nn.Linear(configs.disc_hid_dim, configs.disc_hid_dim),
+            nn.ReLU(),
+            nn.Linear(configs.disc_hid_dim, 1),
+            nn.Sigmoid()
+            # nn.LogSoftmax(dim=1)
+        )
+
+    def forward(self, input):
+        """Forward the discriminator."""
+        out = self.layer(input)
+        return out
 
 #### Codes required by DANN ##############
 class ReverseLayerF(Function):
@@ -263,11 +344,11 @@ class ReverseLayerF(Function):
 
 #### Codes required by CDAN ##############
 class RandomLayer(nn.Module):
-    def __init__(self, input_dim_list=[], output_dim=1024):
+    def __init__(self, input_dim_list=[], output_dim=1024, device="cpu"):
         super(RandomLayer, self).__init__()
         self.input_num = len(input_dim_list)
         self.output_dim = output_dim
-        self.random_matrix = [torch.randn(input_dim_list[i], output_dim) for i in range(self.input_num)]
+        self.random_matrix = [torch.randn(input_dim_list[i], output_dim).to(device) for i in range(self.input_num)]
 
     def forward(self, input_list):
         return_list = [torch.mm(input_list[i], self.random_matrix[i]) for i in range(self.input_num)]
@@ -279,6 +360,11 @@ class RandomLayer(nn.Module):
     def cuda(self):
         super(RandomLayer, self).cuda()
         self.random_matrix = [val.cuda() for val in self.random_matrix]
+
+    '''def to(self, device):
+        for i in range(len(self.random_matrix)):
+            self.random_matrix[i] = self.random_matrix[i].to(device)
+        #self.to(device)'''
 
 
 class Discriminator_CDAN(nn.Module):

@@ -41,8 +41,24 @@ class ConditionalEntropyLoss(torch.nn.Module):
     def forward(self, x):
         b = F.softmax(x, dim=1) * F.log_softmax(x, dim=1)
         b = b.sum(dim=1)
+        return -1.0 * b.sum(dim=0)
+
+class Entropy(torch.nn.Module):
+    def __init__(self):
+        super(Entropy, self).__init__()
+
+    def forward(self, x):
+        b = x*torch.log(x)
+        b = b.sum(dim=1)
         return -1.0 * b.mean(dim=0)
 
+
+class MyBCE(torch.nn.Module):
+    def __init__(self):
+        super(MyBCE, self).__init__()
+
+    def forward(self, p):
+        return (-0.5*torch.log(p) - 0.5*torch.log(1-p)).mean()
 
 class VAT(nn.Module):
     def __init__(self, model, device):
